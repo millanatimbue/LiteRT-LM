@@ -68,6 +68,26 @@ public class Conversation {
     }
   }
 
+  /// Clones this conversation, duplicating its prefilled KV-cache state.
+  ///
+  /// Useful for prefix caching: prefill a "base" conversation with a stable
+  /// system message + history once, then clone it per request and send only
+  /// the variable portion as a user message. Each clone owns its own KV cache
+  /// and history; mutating one does not affect the other.
+  ///
+  /// - Returns: A new `Conversation` that starts from this conversation's
+  ///   current state.
+  /// - Throws: `LiteRTLMError.conversation(.notAlive)` if this conversation has
+  ///   already been deleted, or `.failedToCloneConversation` if the underlying
+  ///   C call returns NULL.
+  public func clone() throws -> Conversation {
+    let handle = try checkIsAlive()
+    guard let clonedHandle = litert_lm_conversation_clone(handle) else {
+      throw LiteRTLMError.conversation(.failedToCloneConversation)
+    }
+    return Conversation(handle: clonedHandle, toolManager: toolManager)
+  }
+
   /// Sends a message to the model and returns the response. This is a synchronous call.
   ///
   /// - Parameter message: The message to send to the model.
