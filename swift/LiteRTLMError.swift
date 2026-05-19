@@ -85,6 +85,7 @@ public enum LiteRTLMError: Error, LocalizedError, Equatable {
     case toolExecutionError(name: String, error: String)
     case benchmarkNotEnabled
     case benchmarkInfoUnavailable
+    case failedToCloneConversation
 
     public var errorDescription: String? {
       switch self {
@@ -109,6 +110,8 @@ public enum LiteRTLMError: Error, LocalizedError, Equatable {
           """
       case .benchmarkInfoUnavailable:
         return "Failed to get benchmark info."
+      case .failedToCloneConversation:
+        return "Failed to clone the conversation (native call returned NULL)."
       }
     }
   }
