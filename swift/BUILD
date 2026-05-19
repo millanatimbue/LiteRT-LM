@@ -112,7 +112,6 @@ apple_xcframework(
     ios = {
         "simulator": [
             "arm64",
-            "x86_64",
         ],
         "device": [
             "arm64",
