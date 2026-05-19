@@ -47,10 +47,13 @@ let package = Package(
         "MessageTests.swift",
         "BUILD",
         "Info.plist",
-      ],
-      linkerSettings: [
-        .unsafeFlags(["-Xlinker", "-all_load"])
       ]
+      // imbue fork: dropped
+      //   linkerSettings: [.unsafeFlags(["-Xlinker", "-all_load"])]
+      // because SPM rejects remote packages that propagate .unsafeFlags into
+      // consuming targets. The same `-Xlinker -all_load` is applied at the
+      // consuming app target's OTHER_LDFLAGS instead (see Bouncer iOS target
+      // build settings in Bouncer.xcodeproj/project.pbxproj).
     ),
     // Separate test targets for each file to avoid naming conflicts:
     .testTarget(
