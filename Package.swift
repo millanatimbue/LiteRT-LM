@@ -41,10 +41,45 @@ let package = Package(
       url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/CLiteRTLM.xcframework.zip",
       checksum: "0e7b214ea1a6e925a199e8d4724be7251a3ef7a8634f647be310a2f3ce51ee14"
     ),
+    // 1a. GPU / accelerator dylibs — shipped as library-style xcframeworks so
+    // they land at the top of Bouncer.app/Frameworks/ (not nested inside
+    // CLiteRTLM.framework, which AMFI rejects on real iOS devices). The main
+    // CLiteRTLM binary's existing `@executable_path/Frameworks` rpath resolves
+    // these via dyld at app launch. Built by `xcodebuild -create-xcframework
+    // -library` against /prebuilt/{ios_arm64,ios_sim_arm64}/lib*.dylib.
+    .binaryTarget(
+      name: "libGemmaModelConstraintProvider",
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/libGemmaModelConstraintProvider.xcframework.zip",
+      checksum: "6f625e13942e21cf230f39e0f1be018a35b8dd887348f3e51d307017954c2a95"
+    ),
+    .binaryTarget(
+      name: "libLiteRt",
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/libLiteRt.xcframework.zip",
+      checksum: "47296b349bc0da07d65da844b14587be7007be52d46d514996a8f9b499c79830"
+    ),
+    .binaryTarget(
+      name: "libLiteRtMetalAccelerator",
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/libLiteRtMetalAccelerator.xcframework.zip",
+      checksum: "6d5f653f7cc00b979faa576f7caec29b2be0952c30703f8080d5e9b285db8053"
+    ),
+    // libLiteRtTopKMetalSampler ships device-only (no simulator slice exists
+    // in upstream's prebuilts). The C++ code is expected to dlopen it
+    // conditionally on device; sim builds run without it.
+    .binaryTarget(
+      name: "libLiteRtTopKMetalSampler",
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/libLiteRtTopKMetalSampler.xcframework.zip",
+      checksum: "21574ca11b6a837bb13d7bb5dd016eb6b21134cf429d2457cbdb045bf855a0cc"
+    ),
     // 2. The Swift Wrapper Target
     .target(
       name: "LiteRTLM",
-      dependencies: ["CLiteRTLM"],
+      dependencies: [
+        "CLiteRTLM",
+        "libGemmaModelConstraintProvider",
+        "libLiteRt",
+        "libLiteRtMetalAccelerator",
+        "libLiteRtTopKMetalSampler",
+      ],
       path: "swift",
       exclude: [
         "CapabilitiesTests.swift",
