@@ -149,17 +149,27 @@ public struct ConversationConfig {
   // If `nil`, then uses the engine's default values.
   public let samplerConfig: SamplerConfig?
 
+  /// Whether to prefill the preface (system message + initial messages) at
+  /// conversation-create time. When `true`, the conversation's KV cache is
+  /// populated immediately, which is required for `clone()`-based prefix
+  /// caching to work — without this, a freshly created base has no runtime
+  /// state for the resource manager to duplicate.
+  public let prefillPrefaceOnInit: Bool
+
   /// - Parameters:
   ///   - systemMessage: The system message to be used in the conversation.
   ///   - initialMessages: The initial messages to populate the conversation history.
   ///   - tools: The list of tool instances to be used in the conversation.
   ///   - samplerConfig: Configuration for the sampling process. If `nil`, then uses the engine's
   ///     default values.
+  ///   - prefillPrefaceOnInit: Whether to prefill the preface on init. Set to
+  ///     `true` for the base conversation in a prefix-caching setup.
   public init(
     systemMessage: Message? = nil,
     initialMessages: [Message] = [],
     tools: [Tool] = [],
-    samplerConfig: SamplerConfig? = nil
+    samplerConfig: SamplerConfig? = nil,
+    prefillPrefaceOnInit: Bool = false
   ) {
     self.systemMessage = systemMessage.map { msg in
       msg.role == .system
@@ -168,5 +178,6 @@ public struct ConversationConfig {
     self.initialMessages = initialMessages
     self.tools = tools
     self.samplerConfig = samplerConfig
+    self.prefillPrefaceOnInit = prefillPrefaceOnInit
   }
 }

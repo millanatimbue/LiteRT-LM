@@ -579,23 +579,44 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
 absl::StatusOr<std::unique_ptr<ContextHandler>>
 ResourceManager::CloneContextHandler(
     std::shared_ptr<const ContextHandler> llm_context_handler) {
+  ABSL_LOG(INFO) << "[CLONE-DBG] ResourceManager::CloneContextHandler: enter "
+                    "handler="
+                 << llm_context_handler.get();
   RET_CHECK_NE(llm_context_handler, nullptr)
       << "The provided context handler should not be null.";
 
   RuntimeConfig runtime_config;
   RuntimeState runtime_state;
 
+  const bool has_config = llm_context_handler->HasRuntimeConfig();
+  const bool has_state = llm_context_handler->HasRuntimeState();
+  ABSL_LOG(INFO) << "[CLONE-DBG] CloneContextHandler: has_runtime_config="
+                 << has_config << " has_runtime_state=" << has_state;
+
   // If the context handler has the runtime config and runtime state, use
   // them directly.
-  if (llm_context_handler->HasRuntimeConfig() &&
-      llm_context_handler->HasRuntimeState()) {
+  if (has_config && has_state) {
     ASSIGN_OR_RETURN(runtime_config, llm_context_handler->GetRuntimeConfig());
     ASSIGN_OR_RETURN(runtime_state, llm_context_handler->GetRuntimeState());
+    ABSL_LOG(INFO)
+        << "[CLONE-DBG] CloneContextHandler: cached config/state path ok";
   } else {
     // Otherwise, assume the context handler is loaded by the manager to the
     // executor, and get the runtime config and runtime state from the
     // executor.
     MovableMutexLock lock(&executor_mutex_);
+    ABSL_LOG(INFO) << "[CLONE-DBG] CloneContextHandler: live-executor path. "
+                      "current_handler_="
+                   << current_handler_.get()
+                   << " provided=" << llm_context_handler.get();
+    if (current_handler_ != llm_context_handler) {
+      ABSL_LOG(ERROR)
+          << "[CLONE-DBG] CloneContextHandler: handler mismatch. The base "
+             "conversation was never prefilled (or another conversation "
+             "displaced it), so the executor's current handler does not "
+             "match. Likely fix: set ConversationConfig::Builder::"
+             "SetPrefillPrefaceOnInit(true).";
+    }
     RET_CHECK_EQ(current_handler_, llm_context_handler)
         << "The provided context handler does not have the runtime config "
            "and "
@@ -603,6 +624,8 @@ ResourceManager::CloneContextHandler(
            "manager does not have the same handler.";
     ASSIGN_OR_RETURN(runtime_config, llm_executor_->GetRuntimeConfig());
     ASSIGN_OR_RETURN(runtime_state, llm_executor_->GetRuntimeState());
+    ABSL_LOG(INFO)
+        << "[CLONE-DBG] CloneContextHandler: live-executor path ok";
   }
   auto processed_context = llm_context_handler->shared_processed_context();
 

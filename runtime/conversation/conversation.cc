@@ -322,6 +322,9 @@ absl::StatusOr<std::unique_ptr<Conversation>> Conversation::Create(
       engine, std::move(session), std::move(model_data_processor),
       config.GetPreface(), config.GetPromptTemplate(), config,
       std::move(constraint_provider)));
+  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Create: prefill_preface_on_init="
+                 << config.prefill_preface_on_init()
+                 << " empty_preface=" << IsEmptyPreface(config.GetPreface());
   if (config.prefill_preface_on_init() &&
       !IsEmptyPreface(config.GetPreface())) {
     std::string single_turn_text;
@@ -668,18 +671,43 @@ void Conversation::CancelGroup(absl::string_view task_group_id) {
 }
 
 absl::StatusOr<std::unique_ptr<Conversation>> Conversation::Clone() {
-  ASSIGN_OR_RETURN(auto session, session_->Clone());
-  ASSIGN_OR_RETURN(
-      std::unique_ptr<ModelDataProcessor> model_data_processor,
-      CreateModelDataProcessor(config_.GetProcessorConfig(),
-                               config_.GetPreface(), &engine_.GetTokenizer(),
-                               session->GetSessionConfig().GetStopTokenIds(),
-                               config_.constrained_decoding_enabled(),
-                               config_.GetPromptTemplate().GetCapabilities()));
+  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Clone: enter, this="
+                 << static_cast<const void*>(this)
+                 << " prefill_preface_on_init="
+                 << config_.prefill_preface_on_init();
+  auto session_or = session_->Clone();
+  if (!session_or.ok()) {
+    ABSL_LOG(ERROR) << "[CLONE-DBG] Conversation::Clone: session->Clone failed: "
+                    << session_or.status();
+    return session_or.status();
+  }
+  auto session = std::move(*session_or);
+  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Clone: session cloned ok";
+
+  auto mdp_or = CreateModelDataProcessor(
+      config_.GetProcessorConfig(), config_.GetPreface(),
+      &engine_.GetTokenizer(),
+      session->GetSessionConfig().GetStopTokenIds(),
+      config_.constrained_decoding_enabled(),
+      config_.GetPromptTemplate().GetCapabilities());
+  if (!mdp_or.ok()) {
+    ABSL_LOG(ERROR)
+        << "[CLONE-DBG] Conversation::Clone: CreateModelDataProcessor failed: "
+        << mdp_or.status();
+    return mdp_or.status();
+  }
+  std::unique_ptr<ModelDataProcessor> model_data_processor =
+      std::move(*mdp_or);
+
   auto status = model_data_processor->CloneState(*model_data_processor_);
   if (!status.ok() && !absl::IsUnimplemented(status)) {
+    ABSL_LOG(ERROR) << "[CLONE-DBG] Conversation::Clone: CloneState failed: "
+                    << status;
     return status;
   }
+  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Clone: CloneState ok (or "
+                    "unimplemented, which is fine)";
+
   std::unique_ptr<ConstraintProvider> constraint_provider;
   if (config_.constraint_provider_config().has_value()) {
     ASSIGN_OR_RETURN(constraint_provider,
@@ -697,6 +725,8 @@ absl::StatusOr<std::unique_ptr<Conversation>> Conversation::Clone() {
     absl::MutexLock lock(history_mutex_);  // NOLINT
     new_conversation->history_ = history_;
   }
+  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Clone: success, new this="
+                 << static_cast<const void*>(new_conversation.get());
   return new_conversation;
 }
 

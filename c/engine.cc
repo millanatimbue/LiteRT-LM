@@ -217,6 +217,7 @@ struct LiteRtLmConversationConfig {
   std::string extra_context_json;
   bool enable_constrained_decoding = false;
   bool filter_channel_content_from_kv_cache = false;
+  bool prefill_preface_on_init = false;
 };
 
 struct LiteRtLmConversationOptionalArgs {
@@ -352,6 +353,13 @@ void litert_lm_conversation_config_set_filter_channel_content_from_kv_cache(
   if (config) {
     config->filter_channel_content_from_kv_cache =
         filter_channel_content_from_kv_cache;
+  }
+}
+
+void litert_lm_conversation_config_set_prefill_preface_on_init(
+    LiteRtLmConversationConfig* config, bool prefill_preface_on_init) {
+  if (config) {
+    config->prefill_preface_on_init = prefill_preface_on_init;
   }
 }
 
@@ -946,6 +954,7 @@ LiteRtLmConversation* litert_lm_conversation_create(
     builder.SetEnableConstrainedDecoding(c_config->enable_constrained_decoding);
     builder.SetFilterChannelContentFromKvCache(
         c_config->filter_channel_content_from_kv_cache);
+    builder.SetPrefillPrefaceOnInit(c_config->prefill_preface_on_init);
     auto config = builder.Build(*engine->engine);
 
     if (!config.ok()) {
@@ -982,16 +991,26 @@ void litert_lm_conversation_delete(LiteRtLmConversation* conversation) {
 
 LiteRtLmConversation* litert_lm_conversation_clone(
     LiteRtLmConversation* conversation) {
-  if (!conversation || !conversation->conversation) {
+  ABSL_LOG(INFO) << "[CLONE-DBG] litert_lm_conversation_clone: enter c_handle="
+                 << static_cast<void*>(conversation);
+  if (!conversation) {
+    ABSL_LOG(ERROR) << "[CLONE-DBG] litert_lm_conversation_clone: NULL c_handle";
+    return nullptr;
+  }
+  if (!conversation->conversation) {
+    ABSL_LOG(ERROR)
+        << "[CLONE-DBG] litert_lm_conversation_clone: NULL inner conversation";
     return nullptr;
   }
   auto cloned = conversation->conversation->Clone();
   if (!cloned.ok()) {
-    ABSL_LOG(ERROR) << "Failed to clone conversation: " << cloned.status();
+    ABSL_LOG(ERROR) << "[CLONE-DBG] Failed to clone conversation: "
+                    << cloned.status();
     return nullptr;
   }
   auto c_conversation = std::make_unique<LiteRtLmConversation>();
   c_conversation->conversation = std::move(*cloned);
+  ABSL_LOG(INFO) << "[CLONE-DBG] litert_lm_conversation_clone: success";
   return c_conversation.release();
 }
 

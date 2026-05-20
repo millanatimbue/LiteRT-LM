@@ -386,18 +386,39 @@ absl::StatusOr<BenchmarkInfo*> SessionAdvanced::GetMutableBenchmarkInfo() {
 }
 
 absl::StatusOr<std::unique_ptr<Engine::Session>> SessionAdvanced::Clone() {
+  ABSL_LOG(INFO) << "[CLONE-DBG] SessionAdvanced::Clone: enter, session_id="
+                 << session_id_ << " session_state="
+                 << static_cast<int>(session_state_);
   absl::Status status = absl::OkStatus();
   std::unique_ptr<Engine::Session> session;
   {
     absl::MutexLock lock(mutex_);
-    ASSIGN_OR_RETURN(
-        session,
+    auto clone_or =
         CloneAsyncLocked([&status](absl::StatusOr<Responses> responses) {
           status = responses.status();
-        }));
+        });
+    if (!clone_or.ok()) {
+      ABSL_LOG(ERROR)
+          << "[CLONE-DBG] SessionAdvanced::Clone: CloneAsyncLocked failed: "
+          << clone_or.status();
+      return clone_or.status();
+    }
+    session = std::move(*clone_or);
   }
-  RETURN_IF_ERROR(WaitUntilDone());
-  RETURN_IF_ERROR(status);
+  auto wait_status = WaitUntilDone();
+  if (!wait_status.ok()) {
+    ABSL_LOG(ERROR)
+        << "[CLONE-DBG] SessionAdvanced::Clone: WaitUntilDone failed: "
+        << wait_status;
+    return wait_status;
+  }
+  if (!status.ok()) {
+    ABSL_LOG(ERROR)
+        << "[CLONE-DBG] SessionAdvanced::Clone: async task status not ok: "
+        << status;
+    return status;
+  }
+  ABSL_LOG(INFO) << "[CLONE-DBG] SessionAdvanced::Clone: success";
   return session;
 }
 

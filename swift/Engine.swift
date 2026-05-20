@@ -189,6 +189,8 @@ public actor Engine {
     }
     litert_lm_conversation_config_set_enable_constrained_decoding(
       cConversationConfig, ExperimentalFlags.enableConversationConstrainedDecoding)
+    litert_lm_conversation_config_set_prefill_preface_on_init(
+      cConversationConfig, conversationConfig.prefillPrefaceOnInit)
 
     guard
       let conversationHandle = litert_lm_conversation_create(
