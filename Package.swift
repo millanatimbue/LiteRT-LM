@@ -30,17 +30,14 @@ let package = Package(
   targets: [
     // 1. The Prebuilt Binary Target
     //
-    // imbue fork: built from upstream main @ b5e7223e (post-v0.12.0) to
-    // pick up commit 2020c366 ("Support multi-session and session-cloning
-    // for compiled model executor"), which makes `Conversation.clone()`
-    // actually work on the CPU/GPU LiteRT executor. The published v0.12.0
-    // binary predates that commit and returns
-    //   UNIMPLEMENTED: Not implemented.
-    // for clone calls, blocking prefix caching.
+    // Points at upstream's published v0.12.0 xcframework. An earlier revision
+    // of this fork pointed at a custom build (main @ b5e7223e) to expose a
+    // working `Conversation.clone()` for prefix caching, but the consuming
+    // app no longer uses clone(), so we ride upstream's release binary.
     .binaryTarget(
       name: "CLiteRTLM",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/main-b5e7223e/CLiteRTLM.xcframework.zip",
-      checksum: "10c8f2c77efc694803eb33abf4f2cdc6c993aa4b16a1615a67aa30f7d6b64e45"
+      url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.12.0/CLiteRTLM.xcframework.zip",
+      checksum: "3c2a11ecc8511d1e74efa7ca308dc7130c95223325c33212337ffb0563b79cde"
     ),
     // 2. The Swift Wrapper Target
     .target(
