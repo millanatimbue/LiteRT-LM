@@ -30,14 +30,16 @@ let package = Package(
   targets: [
     // 1. The Prebuilt Binary Target
     //
-    // Points at upstream's published v0.12.0 xcframework. An earlier revision
-    // of this fork pointed at a custom build (main @ b5e7223e) to expose a
-    // working `Conversation.clone()` for prefix caching, but the consuming
-    // app no longer uses clone(), so we ride upstream's release binary.
+    // Fork-hosted build from millanatimbue/LiteRT-LM main @ c6823c0b. Exposes
+    // `litert_lm_conversation_config_set_prefill_preface_on_init` through the
+    // C/Swift API so `Conversation.clone()` can succeed against a prefilled
+    // base — required for prefix caching in the Bouncer iOS app. Also bundles
+    // [CLONE-DBG] ABSL_LOG diagnostics throughout the clone path. To rebuild,
+    // see the recipe in commit 58977bad.
     .binaryTarget(
       name: "CLiteRTLM",
-      url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.12.0/CLiteRTLM.xcframework.zip",
-      checksum: "3c2a11ecc8511d1e74efa7ca308dc7130c95223325c33212337ffb0563b79cde"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/CLiteRTLM.xcframework.zip",
+      checksum: "0e7b214ea1a6e925a199e8d4724be7251a3ef7a8634f647be310a2f3ce51ee14"
     ),
     // 2. The Swift Wrapper Target
     .target(
