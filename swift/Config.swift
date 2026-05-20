@@ -166,6 +166,13 @@ public struct ConversationConfig {
   public let audioLoraPath: String?
   public let enableToolCallStreaming: Bool
 
+  /// Whether to prefill the preface (system message + initial messages) at
+  /// conversation-create time. When `true`, the conversation's KV cache is
+  /// populated immediately, which is required for `clone()`-based prefix
+  /// caching to work — without this, a freshly created base has no runtime
+  /// state for the resource manager to duplicate.
+  public let prefillPrefaceOnInit: Bool
+
   /// - Parameters:
   ///   - systemMessage: The system message to be used in the conversation.
   ///   - initialMessages: The initial messages to populate the conversation history.
@@ -175,6 +182,8 @@ public struct ConversationConfig {
   ///   - loraPath: The file path to the Text LoRA weights file.
   ///   - audioLoraPath: The file path to the Audio LoRA weights file.
   ///   - enableToolCallStreaming: Whether to enable conversation tool call streaming.
+  ///   - prefillPrefaceOnInit: Whether to prefill the preface on init. Set to
+  ///     `true` for the base conversation in a prefix-caching setup.
   public init(
     systemMessage: Message? = nil,
     initialMessages: [Message] = [],
@@ -182,7 +191,8 @@ public struct ConversationConfig {
     samplerConfig: SamplerConfig? = nil,
     loraPath: String? = nil,
     audioLoraPath: String? = nil,
-    enableToolCallStreaming: Bool = false
+    enableToolCallStreaming: Bool = false,
+    prefillPrefaceOnInit: Bool = false
   ) {
     self.systemMessage = systemMessage.flatMap { msg in
       if msg.toString.isEmpty {
@@ -197,5 +207,6 @@ public struct ConversationConfig {
     self.loraPath = loraPath
     self.audioLoraPath = audioLoraPath
     self.enableToolCallStreaming = enableToolCallStreaming
+    self.prefillPrefaceOnInit = prefillPrefaceOnInit
   }
 }

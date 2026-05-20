@@ -229,6 +229,8 @@ public actor Engine {
       conversationConfig.enableToolCallStreaming
         && ExperimentalFlags.enableConversationToolCallStreaming,
       ExperimentalFlags.conversationToolCallStreamingChannelName)
+    litert_lm_conversation_config_set_prefill_preface_on_init(
+      cConversationConfig, conversationConfig.prefillPrefaceOnInit)
 
     guard
       let conversationHandle = litert_lm_conversation_create(

@@ -267,6 +267,17 @@ void litert_lm_conversation_config_set_stream_tool_calls(
     LiteRtLmConversationConfig* config, bool stream_tool_calls,
     const char* channel_name);
 
+// Sets whether to prefill the preface (system message + initial messages) at
+// Conversation::Create time, so the prefilled KV-cache state is available
+// before the first sendMessage. Required for clone()-based prefix caching:
+// without it, the base conversation's context handler has no runtime state
+// for ResourceManager::CloneContextHandler to duplicate.
+// @param config The config to modify.
+// @param prefill_preface_on_init Whether to prefill the preface on init.
+LITERT_LM_C_API_EXPORT
+void litert_lm_conversation_config_set_prefill_preface_on_init(
+    LiteRtLmConversationConfig* config, bool prefill_preface_on_init);
+
 // Destroys a LiteRT LM Conversation Config.
 // @param config The config to destroy.
 LITERT_LM_C_API_EXPORT
