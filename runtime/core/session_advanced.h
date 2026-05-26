@@ -178,6 +178,9 @@ class SessionAdvanced : public SessionInterface {
   // Get the current step of the session.
   absl::StatusOr<int> GetCurrentStep() const override;
 
+  absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+      absl::string_view name) override;
+
   // TODO(b/450903294): Add rollback history support for Session and
   // Conversation.
   void CancelProcess() override {
