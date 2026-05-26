@@ -194,6 +194,9 @@ class SerialExecutionManager : public ExecutionManager {
   // - The current step of the session.
   absl::StatusOr<int> GetCurrentStep(const SessionInfo& session_info) override;
 
+  absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+      const SessionInfo& session_info, absl::string_view name) override;
+
   // Sets the current step of the session to the target step.
   // - session_info: The session info of the session.
   // - target_step: The step to set the executor's current step to.

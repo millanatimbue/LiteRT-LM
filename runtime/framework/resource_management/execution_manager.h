@@ -233,6 +233,14 @@ class ExecutionManager {
   virtual absl::Status SetCurrentStep(const SessionInfo& session_info,
                                       int target_step) = 0;
 
+  // Reads a named auxiliary output tensor populated by the executor's most
+  // recent decode call for the given session. Mirrors the synchronous
+  // executor-read pattern established by GetCurrentStep — acquires the
+  // executor with the session's context handler and forwards to
+  // LlmExecutorBase::GetAuxiliaryOutput.
+  virtual absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+      const SessionInfo& session_info, absl::string_view name) = 0;
+
   // Returns the audio executor properties.
   virtual absl::StatusOr<AudioExecutorProperties> GetAudioExecutorProperties()
       const = 0;

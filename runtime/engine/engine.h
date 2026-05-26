@@ -284,6 +284,22 @@ class Engine {
       return absl::UnimplementedError("GetCurrentStep not implemented.");
     }
 
+    // Reads a named auxiliary output tensor populated by the most recent
+    // decode call. Use when the underlying model graph declares additional
+    // outputs beyond the canonical logits — e.g., a fused classifier head
+    // emitting `classifier_logit` alongside generation. The returned vector
+    // is the flattened float32 contents of the tensor in row-major order
+    // (float16 outputs are widened to float32 on copy). The expected shape
+    // is determined by the model export.
+    //
+    // Must be called after at least one decode step has run on this session.
+    // Returns NotFound if the model does not declare a tensor with the given
+    // name in the decode signature.
+    virtual absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+        absl::string_view name) {
+      return absl::UnimplementedError("GetAuxiliaryOutput not implemented.");
+    }
+
     // Get the reference to the session config for the session.
     virtual const SessionConfig& GetSessionConfig() const = 0;
   };
