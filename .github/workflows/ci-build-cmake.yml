@@ -15,6 +15,13 @@
 name: "CI-CMake"
 
 
+
+on:
+  # Disabled on this fork: this workflow is upstream-inherited and targets
+  # self-hosted runners that this fork does not have. We build only the iOS
+  # XCFramework via .github/workflows/build-ios-xcframework.yml. Trigger
+  # manually via the Actions tab if you ever need to re-enable.
+  workflow_dispatch:
 permissions:
   contents: read
   actions: write
