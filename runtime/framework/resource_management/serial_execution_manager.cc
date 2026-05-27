@@ -981,6 +981,14 @@ absl::StatusOr<int> SerialExecutionManager::GetCurrentStep(
   return llm_executor->GetCurrentStep();
 }
 
+absl::StatusOr<std::vector<float>> SerialExecutionManager::GetAuxiliaryOutput(
+    const SessionInfo& session_info, absl::string_view name) {
+  ASSIGN_OR_RETURN(auto llm_executor,
+                   resource_manager_->AcquireExecutorWithContextHandler(
+                       session_info.context_handler));
+  return llm_executor->GetAuxiliaryOutput(name);
+}
+
 absl::Status SerialExecutionManager::SetCurrentStep(
     const SessionInfo& session_info, int target_step) {
   ASSIGN_OR_RETURN(auto llm_executor,

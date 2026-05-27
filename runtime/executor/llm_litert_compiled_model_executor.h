@@ -86,6 +86,14 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   absl::StatusOr<TensorBuffer> DecodeLogits(
       const ExecutorInputs& inputs, const ExecutorDecodeParams& decode_params);
 
+  // Reads a non-logits output tensor populated by the most recent decode
+  // call. The tensor is looked up by name in decode_output_buffers_, locked
+  // for host-side read, and returned as float32 (widened from float16 if
+  // necessary). Returns NotFound when the model graph does not declare an
+  // output tensor with that name.
+  absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+      absl::string_view name) override;
+
   // State/context management APIs:
   absl::StatusOr<std::unique_ptr<LlmContext>> CreateNewContext(
       std::optional<uint32_t> lora_id,

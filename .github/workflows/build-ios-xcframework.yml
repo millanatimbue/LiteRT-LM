@@ -1,0 +1,195 @@
+# Builds CLiteRTLM.xcframework — the iOS artifact consumed by the Bouncer app
+# via Package.swift's binaryTarget. Triggered on:
+#   - Pushes to main: produces a workflow artifact (downloadable for 30 days),
+#     no release.
+#   - Tags matching `xcframework-*`: produces a workflow artifact AND creates
+#     a GitHub release with that tag name, attaching the .zip. This is the
+#     pattern for shipping a new build to the iOS app.
+#   - Manual workflow_dispatch: same as above, with the tag name supplied as
+#     an input.
+#
+# Only CLiteRTLM.xcframework is built here. The four accelerator XCFrameworks
+# (libGemmaModelConstraintProvider, libLiteRt, libLiteRtMetalAccelerator,
+# libLiteRtTopKMetalSampler) are repackaged from upstream LFS prebuilts and
+# don't depend on this fork's source — they're hosted once at the
+# `prefix-cache-v1` release and reused. If they ever need rebuilding, that's
+# a separate workflow.
+
+name: Build iOS XCFramework
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'xcframework-*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: >-
+          Tag to publish under (e.g. `xcframework-aux-output-v1`). Leave empty
+          to skip the release and only upload as a workflow artifact.
+        required: false
+        default: ''
+      ref:
+        description: >-
+          Branch / commit / tag to build. Defaults to the branch the workflow
+          was dispatched on. Useful for building feature branches before merge.
+        required: false
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build CLiteRTLM.xcframework
+    runs-on: macos-latest
+    permissions:
+      contents: write  # Required to create releases + upload assets.
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Checkout without LFS smudge: this fork strips its LFS pointers (see
+      # commit 58977ba), so a smudging checkout will fail. We fetch the iOS
+      # prebuilts from upstream in a later step instead.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          lfs: false
+
+      - name: Install bazelisk
+        run: brew install bazelisk
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      # Bazel's external repo cache + build output is the single biggest cost
+      # driver. Cache it across runs keyed on WORKSPACE + BUILD-file hashes so
+      # source-only edits land in the cache.
+      - name: Bazel disk cache
+        id: bazel-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel-ios-xcframework
+          key: bazel-ios-xcframework-${{ hashFiles('WORKSPACE', '.bazelrc', '**/BUILD*', '**/*.bzl') }}-${{ github.sha }}
+          restore-keys: |
+            bazel-ios-xcframework-${{ hashFiles('WORKSPACE', '.bazelrc', '**/BUILD*', '**/*.bzl') }}-
+            bazel-ios-xcframework-
+
+      # Restore the GPU/accelerator dylibs that Millan stripped to unblock SPM
+      # checkout. They live in upstream's LFS storage; we pull them from there
+      # and copy them into this fork's `prebuilt/` directory so the bazel
+      # build can link against them.
+      - name: Fetch iOS prebuilt dylibs from upstream
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          git clone --depth 1 https://github.com/google-ai-edge/LiteRT-LM upstream-prebuilts
+          cd upstream-prebuilts
+          git lfs install
+          git lfs pull --include "prebuilt/ios_arm64/*,prebuilt/ios_sim_arm64/*"
+          mkdir -p "$GITHUB_WORKSPACE/prebuilt"
+          cp -R prebuilt/ios_arm64 "$GITHUB_WORKSPACE/prebuilt/"
+          cp -R prebuilt/ios_sim_arm64 "$GITHUB_WORKSPACE/prebuilt/"
+          ls -lh "$GITHUB_WORKSPACE/prebuilt/ios_arm64/"
+
+      - name: Smoke test - bazel query
+        run: bazelisk query //swift:CLiteRTLM
+
+      - name: Build //swift:CLiteRTLM
+        run: |
+          bazelisk build \
+            --disk_cache=$HOME/.cache/bazel-ios-xcframework \
+            //swift:CLiteRTLM
+
+      - name: Stage artifact + compute checksum
+        id: artifact
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp bazel-bin/swift/CLiteRTLM.xcframework.zip out/
+          CHECKSUM=$(swift package compute-checksum out/CLiteRTLM.xcframework.zip)
+          SIZE=$(stat -f%z out/CLiteRTLM.xcframework.zip)
+          echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "----"
+          echo "CLiteRTLM.xcframework.zip"
+          echo "  size:     $SIZE bytes"
+          echo "  checksum: $CHECKSUM"
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CLiteRTLM.xcframework
+          path: out/CLiteRTLM.xcframework.zip
+          retention-days: 30
+
+      # Choose a release tag: explicit tag-push wins; otherwise use the
+      # workflow_dispatch input if supplied; otherwise no release.
+      - name: Resolve release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to GitHub release
+        if: steps.tag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          CHECKSUM: ${{ steps.artifact.outputs.checksum }}
+        run: |
+          set -euo pipefail
+          BUILT_FROM="${GITHUB_SHA}"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          NOTES=$(printf "Built from \`%s\` at %s.\n\nSHA256 checksum: \`%s\`\n\nUpdate \`Package.swift\` CLiteRTLM binaryTarget:\n\n\`\`\`swift\n.binaryTarget(\n  name: \"CLiteRTLM\",\n  url: \"https://github.com/%s/releases/download/%s/CLiteRTLM.xcframework.zip\",\n  checksum: \"%s\"\n)\n\`\`\`" "$BUILT_FROM" "$BUILT_AT" "$CHECKSUM" "$GITHUB_REPOSITORY" "$TAG" "$CHECKSUM")
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release '$TAG' already exists — uploading and replacing the asset."
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "CLiteRTLM build: $TAG" \
+              --notes "$NOTES"
+          fi
+          gh release upload "$TAG" out/CLiteRTLM.xcframework.zip \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Job summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## CLiteRTLM.xcframework build"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **Commit** | \`${GITHUB_SHA}\` |"
+            echo "| **Size** | ${{ steps.artifact.outputs.size }} bytes |"
+            echo "| **SHA256** | \`${{ steps.artifact.outputs.checksum }}\` |"
+            if [ -n "${{ steps.tag.outputs.tag }}" ]; then
+              echo "| **Release tag** | \`${{ steps.tag.outputs.tag }}\` |"
+              echo "| **Download URL** | https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.tag.outputs.tag }}/CLiteRTLM.xcframework.zip |"
+              echo ""
+              echo "### Update Package.swift"
+              echo ""
+              echo '```swift'
+              echo '.binaryTarget('
+              echo '  name: "CLiteRTLM",'
+              echo "  url: \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${{ steps.tag.outputs.tag }}/CLiteRTLM.xcframework.zip\","
+              echo "  checksum: \"${{ steps.artifact.outputs.checksum }}\""
+              echo ')'
+              echo '```'
+            else
+              echo ""
+              echo "_No release tag specified — artifact is available as a workflow attachment only._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

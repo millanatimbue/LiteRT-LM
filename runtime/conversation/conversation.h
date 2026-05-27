@@ -533,6 +533,19 @@ class Conversation {
   absl::StatusOr<std::string> RenderMessageIntoString(
       const Message& message, OptionalArgs optional_args);
 
+  // Reads a named auxiliary output tensor populated by the most recent
+  // decode call on the underlying session. Use when the model graph declares
+  // additional output tensors beyond logits — e.g., a fused classifier head
+  // emitting `classifier_logit`. The returned vector is the flattened float32
+  // contents of the tensor in row-major order (float16 is widened on copy).
+  //
+  // Must be called after at least one decode step has run (i.e., after a
+  // successful SendMessage / SendMessageAsync that produced a model
+  // response). Returns NotFound if the model does not declare a tensor with
+  // the given name.
+  absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+      absl::string_view name);
+
  private:
   explicit Conversation(
       Engine& engine, std::unique_ptr<Engine::Session> session,

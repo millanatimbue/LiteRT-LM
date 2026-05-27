@@ -283,6 +283,54 @@ public class Conversation {
     litert_lm_conversation_cancel_process(handle)
   }
 
+  /// Reads a named auxiliary output tensor populated by the model during the
+  /// most recent decode step on this conversation.
+  ///
+  /// Use this when the model graph declares output tensors beyond the
+  /// canonical logits — for example, a fused classifier head that emits a
+  /// `classifier_logit` tensor alongside the next-token logits. The returned
+  /// array is the flattened row-major contents of the tensor as Float32
+  /// (Float16 model outputs are widened to Float32 on copy).
+  ///
+  /// Call this only after at least one model response has been generated via
+  /// `sendMessage` / `sendMessageStream`. The named tensor must be declared
+  /// as an output of the model's decode signature; if not, this throws.
+  ///
+  /// - Parameter name: The name of the output tensor as declared by the
+  ///   compiled model's decode signature.
+  /// - Returns: The tensor's float32 contents in row-major order.
+  /// - Throws: `LiteRTLMError.conversation(.auxiliaryOutputUnavailable)` if
+  ///   the tensor is not declared by the model, the model has not yet been
+  ///   decoded, or the native readback failed.
+  public func getAuxiliaryOutput(name: String) throws -> [Float] {
+    let handle = try checkIsAlive()
+
+    // Two-call pattern: query size with a null buffer, allocate, then copy.
+    var size: Int = 0
+    let queriedOk = name.withCString { namePtr -> Bool in
+      litert_lm_conversation_get_aux_output_floats(
+        handle, namePtr, /*out_floats=*/nil, /*out_capacity=*/0, &size)
+    }
+    guard queriedOk else {
+      throw LiteRTLMError.conversation(.auxiliaryOutputUnavailable(name: name))
+    }
+    if size == 0 {
+      return []
+    }
+    var values = [Float](repeating: 0, count: size)
+    let copiedOk = values.withUnsafeMutableBufferPointer { buffer -> Bool in
+      name.withCString { namePtr in
+        var capturedSize: Int = 0
+        return litert_lm_conversation_get_aux_output_floats(
+          handle, namePtr, buffer.baseAddress, buffer.count, &capturedSize)
+      }
+    }
+    guard copiedOk else {
+      throw LiteRTLMError.conversation(.auxiliaryOutputUnavailable(name: name))
+    }
+    return values
+  }
+
   /// Retrieves the benchmark information from the conversation.
   ///
   /// - Returns: The benchmark information
