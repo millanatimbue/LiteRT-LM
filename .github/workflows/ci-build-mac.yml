@@ -14,21 +14,12 @@
 
 name: "CI-Mac"
 on:
-  push:
-    tags:
-    - v*.*.*
-  pull_request:
-    branches:
-    - main
-  schedule:
-    - cron: "0 10 * * *"  # Run at 2am PST (10am UTC) every day to refresh the cache.
-  workflow_dispatch:  # Manual trigger
-    inputs:
-      REFRESH_CACHE:
-        description: 'Refresh cache to remove unused files'
-        type: boolean
-        default: true
-
+  # Disabled on this fork: this workflow is upstream-inherited and targets
+  # platforms/runners (Linux self-hosted, Windows self-hosted, full macOS
+  # bazel matrix) that this fork does not need. We build only the iOS
+  # XCFramework via .github/workflows/build-ios-xcframework.yml. Trigger
+  # manually via the Actions tab if you need to re-enable temporarily.
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
