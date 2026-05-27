@@ -23,6 +23,19 @@ on:
       - main
     tags:
       - 'xcframework-*'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'c/**'
+      - 'runtime/**'
+      - 'schema/**'
+      - 'swift/**'
+      - 'WORKSPACE'
+      - '.bazelrc'
+      - '**/BUILD'
+      - '**/*.bzl'
+      - '.github/workflows/build-ios-xcframework.yml'
   workflow_dispatch:
     inputs:
       release_tag:
