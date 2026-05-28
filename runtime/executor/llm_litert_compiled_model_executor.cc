@@ -360,6 +360,21 @@ absl::StatusOr<TensorBuffer> CreateFP16OutputBuffer(
 
 }  // namespace
 
+LoraManager* LlmLiteRtCompiledModelExecutorBase::lora_manager() {
+  if (lora_manager_ != nullptr) {
+    return lora_manager_.get();
+  }
+  if (compiled_model_ == nullptr) {
+    return nullptr;
+  }
+  auto created = LoraManager::Create(*compiled_model_);
+  if (!created.ok()) {
+    return nullptr;
+  }
+  lora_manager_ = std::move(*created);
+  return lora_manager_.get();
+}
+
 absl::Status LlmLiteRtCompiledModelExecutorBase::CreatePrefillInputBuffers(
     absl::string_view prefill_signature, int sequence_length,
     int context_length,
@@ -911,11 +926,11 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::DecodeInternal(
         decode_input_buffers_[signatures_.input_int32_param.value()], step, 1));
   }
 
-  return BindTensorsAndRunDecode(&output_logits);
+  return BindTensorsAndRunDecode(&output_logits, decode_signature_name_);
 }
 
 absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
-    TensorBuffer* output_logits) {
+    TensorBuffer* output_logits, absl::string_view signature_name) {
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers;
   for (const auto& [input_name, input_buffer] : decode_input_buffers_) {
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
@@ -924,6 +939,16 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
   for (const auto& [input_name, input_buffer] : *input_kv_cache_buffers_) {
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
     decode_input_buffers[input_name] = std::move(input_buffer_dup);
+  }
+  // Merge active LoRA tensors. Executor skips LoRA-named inputs at buffer
+  // construction (see IsLoRAInputName branch in CreateDecodeBuffers), so the
+  // graph would be missing those inputs without this hook.
+  if (lora_manager_ != nullptr &&
+      lora_manager_->GetCurrentLoRAId().has_value()) {
+    ASSIGN_OR_RETURN(auto lora_buffers, lora_manager_->GetLoRABuffers());
+    for (auto& [input_name, input_buffer] : lora_buffers) {
+      decode_input_buffers[input_name] = std::move(input_buffer);
+    }
   }
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_output_buffers;
   for (const auto& [output_name, output_buffer] : decode_output_buffers_) {
@@ -944,7 +969,7 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
 
   bool async = true;
   LITERT_RETURN_IF_ERROR(
-      compiled_model_->RunAsync(kDecodeSignatureRunner, decode_input_buffers,
+      compiled_model_->RunAsync(signature_name, decode_input_buffers,
                                 decode_output_buffers, async));
 
   if (!gpu_optimized_single_buffer_cache_) {
@@ -957,7 +982,8 @@ int LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecodeStatic(
     void* arg) {
   auto self = static_cast<LlmLiteRtCompiledModelExecutorBase*>(arg);
   // Run decode with default output_logits.
-  auto status = self->BindTensorsAndRunDecode(/*output_logits=*/nullptr);
+  auto status = self->BindTensorsAndRunDecode(
+      /*output_logits=*/nullptr, self->decode_signature_name_);
   if (!status.ok()) {
     ABSL_LOG(ERROR) << "Failed to bind tensors and run decode: " << status;
   }

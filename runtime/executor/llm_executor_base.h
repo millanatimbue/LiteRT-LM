@@ -110,6 +110,16 @@ class LlmExecutorBase {
         ExecutorBackendName()));
   };
 
+  // Returns this executor's LoRA manager if it supports LoRA, otherwise
+  // nullptr. Backends that don't manage LoRA at runtime (e.g. fakes, NPU)
+  // simply return nullptr.
+  virtual class LoraManager* lora_manager() { return nullptr; }
+
+  // Selects which compiled-model decode signature this executor invokes from
+  // here on. Defaults to "decode". Backends that only support a single
+  // signature should ignore non-default names (default impl is a no-op).
+  virtual void SetDecodeSignatureName(absl::string_view name) {}
+
   virtual absl::string_view ExecutorBackendName() const = 0;
 
   // Get vocabulary size used to build tensor buffers for decode functions.

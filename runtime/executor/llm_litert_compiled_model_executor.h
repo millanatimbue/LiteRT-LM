@@ -35,6 +35,7 @@
 #include "litert/cc/litert_options.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "runtime/components/embedding_lookup/embedding_lookup_manager.h"
+#include "runtime/components/lora_manager.h"
 #include "runtime/components/model_resources.h"
 #include "runtime/components/sampler.h"
 #include "runtime/executor/executor_settings_base.h"
@@ -174,6 +175,14 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
     return llm_context_->processed_context().processed_tokens();
   }
 
+  // Lazy-initialized LoRA manager bound to this executor's compiled model.
+  // Returns nullptr if LoraManager creation fails. Caller does not own.
+  LoraManager* lora_manager() override;
+
+  void SetDecodeSignatureName(absl::string_view name) override {
+    decode_signature_name_ = std::string(name);
+  }
+
  protected:
   LlmLiteRtCompiledModelExecutorBase(
       LlmExecutorSettings executor_settings, Environment& env,
@@ -275,8 +284,11 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
       TensorBuffer& output_logits);
 
   // Helper function of DecodeInternal to bind input/output tensors for decode
-  // and run decode signature.
-  absl::Status BindTensorsAndRunDecode(TensorBuffer* output_logits);
+  // and run decode signature. `signature_name` selects which compiled-model
+  // signature to invoke; defaults to "decode" to preserve existing call sites.
+  absl::Status BindTensorsAndRunDecode(
+      TensorBuffer* output_logits,
+      absl::string_view signature_name = "decode");
   // Static version of BindTensorsAndRunDecode to be used as a callback for
   // sampler.
   static int BindTensorsAndRunDecodeStatic(void* arg);
@@ -329,6 +341,10 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   Environment& env_;
   const Model& model_;
   std::unique_ptr<CompiledModel> compiled_model_;
+  // Lazy-initialized on first lora_manager() call. Bound to compiled_model_ for
+  // its lifetime, so it cannot outlive the executor.
+  mutable std::unique_ptr<LoraManager> lora_manager_;
+  std::string decode_signature_name_ = "decode";
 
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers_;
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_output_buffers_;

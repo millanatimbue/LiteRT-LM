@@ -1,2 +1,8 @@
 /MODULE.bazel.lock
 /bazel-*
+
+# Local artifacts that don't belong in the fork.
+/prebuilt/                                     # fetched from upstream LFS on demand
+/.build/                                       # SwiftPM build dir
+/.swiftpm/                                     # SwiftPM workspace state
+runtime/testdata/*.xnnpack_cache_*             # runtime XNNPACK caches from smoke tests

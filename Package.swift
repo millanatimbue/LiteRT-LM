@@ -79,7 +79,7 @@ let package = Package(
         "libGemmaModelConstraintProvider",
         "libLiteRt",
         "libLiteRtMetalAccelerator",
-        "libLiteRtTopKMetalSampler",
+        // libLiteRtTopKMetalSampler dropped — no simulator slice; dlopen'd on device.
       ],
       path: "swift",
       exclude: [

@@ -196,6 +196,7 @@ RESOURCE_MANAGER_DEPS = [
     "@com_google_absl//absl/strings",
     "@com_google_absl//absl/synchronization",
     "@com_google_absl//absl/types:span",
+    "//runtime/components:lora_manager",
     "//runtime/components:model_resources",
     "//runtime/engine:engine_settings",
     "//runtime/engine:io_types",

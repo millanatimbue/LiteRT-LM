@@ -33,6 +33,7 @@
 #include "litert/cc/litert_environment_options.h"  // from @litert
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
+#include "runtime/components/lora_manager.h"
 #include "runtime/components/model_resources.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
@@ -543,8 +544,16 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
     ASSIGN_OR_RETURN(ModelAssets model_assets,
                      ModelAssets::Create(session_config.GetScopedLoraFile(),
                                          /*model_path=*/""));
-    return absl::InvalidArgumentError("Lora is not supported.");
+    LoraManager* lora_mgr = llm_executor_->lora_manager();
+    if (lora_mgr == nullptr) {
+      return absl::UnimplementedError(
+          "LoRA load requested but executor backend has no LoraManager.");
+    }
+    RETURN_IF_ERROR(lora_mgr->LoadLoRA(*lora_id, model_assets));
+    RETURN_IF_ERROR(lora_mgr->UseLoRA(*lora_id));
   }
+
+  llm_executor_->SetDecodeSignatureName(session_config.GetDecodeSignatureName());
 
   auto runtime_config = RuntimeConfig{
     .output_heads = session_config.GetNumOutputCandidates(),

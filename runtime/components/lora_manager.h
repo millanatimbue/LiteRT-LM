@@ -59,6 +59,10 @@ class LoraManager {
   // doesn't exist, it will be created.
   absl::Status UseLoRA(uint32_t lora_id);
 
+  // Resets the current LoRA so subsequent GetLoRABuffers() calls report no
+  // active LoRA. Loaded LoRAs remain available — switch back with UseLoRA().
+  void ClearCurrentLoRA() { current_lora_id_ = std::nullopt; }
+
   // Returns a map of all the LoRA tensor names to their duplicated
   // TensorBuffers for the current LoRA ID.
   absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
