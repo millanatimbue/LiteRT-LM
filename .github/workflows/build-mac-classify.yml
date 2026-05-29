@@ -15,10 +15,11 @@
 name: Build macOS classify CLI
 
 on:
+  # Push triggers limited to default branch + release tags so feature
+  # branches with open PRs don't run the workflow twice (push + pull_request).
   push:
     branches:
       - main
-      - expose-aux-tensor-outputs
     tags:
       - 'classify-main-mac-*'
     paths:
