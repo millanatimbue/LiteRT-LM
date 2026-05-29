@@ -655,6 +655,11 @@ absl::StatusOr<BenchmarkInfo*> Conversation::GetMutableBenchmarkInfo() {
   return session_->GetMutableBenchmarkInfo();
 }
 
+absl::StatusOr<std::vector<float>> Conversation::GetAuxiliaryOutput(
+    absl::string_view name) {
+  return session_->GetAuxiliaryOutput(name);
+}
+
 void Conversation::CancelProcess() { session_->CancelProcess(); }
 
 void Conversation::CancelGroup(absl::string_view task_group_id) {

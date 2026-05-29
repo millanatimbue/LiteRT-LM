@@ -131,6 +131,7 @@ cc_library(
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:span",
         "@litert//litert/cc:litert_ranked_tensor_type",
+        "//runtime/components:lora_manager",
         "//runtime/components:model_resources",
         "//runtime/components:model_resources_litert_lm",
         "//runtime/components:model_resources_task",

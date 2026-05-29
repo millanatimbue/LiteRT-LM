@@ -93,6 +93,33 @@ class LlmExecutorBase {
                      ExecutorBackendName()));
   };
 
+  // Reads a named auxiliary output tensor that was populated by the most
+  // recent decode call. Intended for models that declare additional output
+  // tensors alongside the canonical logits — e.g., a fused classifier head
+  // emitting `classifier_logit`. The runtime already routes every declared
+  // model output into the executor's internal output-buffer map; this method
+  // just exposes one by name as host-side floats. Float32 and float16 tensor
+  // element types are both supported (float16 is widened to float32 on copy).
+  // Returns NotFound if the model graph does not declare a tensor with that
+  // name in the decode signature, or Unimplemented for backends that do not
+  // expose this surface.
+  virtual absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+      absl::string_view name) {
+    return absl::UnimplementedError(absl::StrCat(
+        "GetAuxiliaryOutput not implemented for backend: ",
+        ExecutorBackendName()));
+  };
+
+  // Returns this executor's LoRA manager if it supports LoRA, otherwise
+  // nullptr. Backends that don't manage LoRA at runtime (e.g. fakes, NPU)
+  // simply return nullptr.
+  virtual class LoraManager* lora_manager() { return nullptr; }
+
+  // Selects which compiled-model decode signature this executor invokes from
+  // here on. Defaults to "decode". Backends that only support a single
+  // signature should ignore non-default names (default impl is a no-op).
+  virtual void SetDecodeSignatureName(absl::string_view name) {}
+
   virtual absl::string_view ExecutorBackendName() const = 0;
 
   // Get vocabulary size used to build tensor buffers for decode functions.

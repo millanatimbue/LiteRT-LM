@@ -360,6 +360,21 @@ absl::StatusOr<TensorBuffer> CreateFP16OutputBuffer(
 
 }  // namespace
 
+LoraManager* LlmLiteRtCompiledModelExecutorBase::lora_manager() {
+  if (lora_manager_ != nullptr) {
+    return lora_manager_.get();
+  }
+  if (compiled_model_ == nullptr) {
+    return nullptr;
+  }
+  auto created = LoraManager::Create(*compiled_model_);
+  if (!created.ok()) {
+    return nullptr;
+  }
+  lora_manager_ = std::move(*created);
+  return lora_manager_.get();
+}
+
 absl::Status LlmLiteRtCompiledModelExecutorBase::CreatePrefillInputBuffers(
     absl::string_view prefill_signature, int sequence_length,
     int context_length,
@@ -723,6 +738,30 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
     input_buffers[input_name] = std::move(input_buffer_dup);
   }
+  // Merge LoRA tensors into prefill inputs if a LoRA is active on THIS
+  // context. We read the lora_id from the current context's processed_context,
+  // not from LoraManager's `current_lora_id_` — that's engine-scoped and
+  // leaks across sessions, e.g. a chat sendMessage that follows a classifier
+  // session would see the classifier LoRA bound here and emit garbage.
+  // The compiled model graph must declare the LoRA inputs in this signature
+  // for binding to take effect; we pass `prefill_signature` to LoraManager so
+  // it returns buffers shaped for this specific signature's runner.
+  const std::optional<uint32_t> prefill_lora_id =
+      llm_context_->processed_context().lora_id();
+  ABSL_LOG(INFO) << "[LoRA-DBG] BindTensorsAndRunPrefill: signature="
+                 << prefill_signature << " context_lora_id="
+                 << (prefill_lora_id.has_value()
+                         ? absl::StrCat(*prefill_lora_id)
+                         : std::string("none"))
+                 << " lora_manager_set="
+                 << (lora_manager_ != nullptr);
+  if (lora_manager_ != nullptr && prefill_lora_id.has_value()) {
+    ASSIGN_OR_RETURN(auto lora_buffers,
+                     lora_manager_->GetLoRABuffers(prefill_signature));
+    for (auto& [input_name, input_buffer] : lora_buffers) {
+      input_buffers[input_name] = std::move(input_buffer);
+    }
+  }
   absl::flat_hash_map<absl::string_view, TensorBuffer> output_buffers;
   for (const auto& [output_name, output_buffer] : *output_kv_cache_buffers_) {
     LITERT_ASSIGN_OR_RETURN(auto output_buffer_dup, output_buffer.Duplicate());
@@ -911,11 +950,11 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::DecodeInternal(
         decode_input_buffers_[signatures_.input_int32_param.value()], step, 1));
   }
 
-  return BindTensorsAndRunDecode(&output_logits);
+  return BindTensorsAndRunDecode(&output_logits, decode_signature_name_);
 }
 
 absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
-    TensorBuffer* output_logits) {
+    TensorBuffer* output_logits, absl::string_view signature_name) {
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers;
   for (const auto& [input_name, input_buffer] : decode_input_buffers_) {
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
@@ -924,6 +963,46 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
   for (const auto& [input_name, input_buffer] : *input_kv_cache_buffers_) {
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
     decode_input_buffers[input_name] = std::move(input_buffer_dup);
+  }
+  // Merge active LoRA tensors. Executor skips LoRA-named inputs at buffer
+  // construction (see IsLoRAInputName branch in CreateDecodeBuffers), so the
+  // graph would be missing those inputs without this hook. Read the lora_id
+  // from THIS context (set at CreateNewContext time from session_config), not
+  // from LoraManager's engine-scoped `current_lora_id_` — that bleeds across
+  // sessions. Pass the active decode signature name (typically "decode") so
+  // LoraManager returns buffers created via CreateInputBuffer on that
+  // signature — required for LiteRT's per-signature buffer-type compatibility.
+  const std::optional<uint32_t> decode_lora_id =
+      llm_context_->processed_context().lora_id();
+  ABSL_LOG(INFO) << "[LoRA-DBG] BindTensorsAndRunDecode: signature="
+                 << signature_name << " context_lora_id="
+                 << (decode_lora_id.has_value()
+                         ? absl::StrCat(*decode_lora_id)
+                         : std::string("none"))
+                 << " lora_manager_set="
+                 << (lora_manager_ != nullptr);
+  // Dump classifier_logits BEFORE we run decode so we can tell whether
+  // the call mutates the buffer or leaves stale state from a prior run.
+  for (const auto& [name, buf] : decode_output_buffers_) {
+    if (name == "classifier_logits") {
+      LITERT_ASSIGN_OR_RETURN(auto dup, buf.Duplicate());
+      auto vals = CopyFromTensorBuffer<float>(dup);
+      if (vals.HasValue()) {
+        const auto& v = vals.Value();
+        ABSL_LOG(INFO) << "[AUX-DBG] pre-decode classifier_logits[0..3]="
+                       << (v.size() > 0 ? v[0] : 0.f) << ","
+                       << (v.size() > 1 ? v[1] : 0.f) << ","
+                       << (v.size() > 2 ? v[2] : 0.f) << ","
+                       << (v.size() > 3 ? v[3] : 0.f);
+      }
+    }
+  }
+  if (lora_manager_ != nullptr && decode_lora_id.has_value()) {
+    ASSIGN_OR_RETURN(auto lora_buffers,
+                     lora_manager_->GetLoRABuffers(signature_name));
+    for (auto& [input_name, input_buffer] : lora_buffers) {
+      decode_input_buffers[input_name] = std::move(input_buffer);
+    }
   }
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_output_buffers;
   for (const auto& [output_name, output_buffer] : decode_output_buffers_) {
@@ -944,11 +1023,28 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
 
   bool async = true;
   LITERT_RETURN_IF_ERROR(
-      compiled_model_->RunAsync(kDecodeSignatureRunner, decode_input_buffers,
+      compiled_model_->RunAsync(signature_name, decode_input_buffers,
                                 decode_output_buffers, async));
 
   if (!gpu_optimized_single_buffer_cache_) {
     std::swap(input_kv_cache_buffers_, output_kv_cache_buffers_);
+  }
+  // Dump classifier_logits AFTER decode to confirm whether the runtime
+  // actually wrote new values. If post == pre, the model graph isn't
+  // producing classifier output (or the write got dropped).
+  for (const auto& [name, buf] : decode_output_buffers_) {
+    if (name == "classifier_logits") {
+      LITERT_ASSIGN_OR_RETURN(auto dup, buf.Duplicate());
+      auto vals = CopyFromTensorBuffer<float>(dup);
+      if (vals.HasValue()) {
+        const auto& v = vals.Value();
+        ABSL_LOG(INFO) << "[AUX-DBG] post-decode classifier_logits[0..3]="
+                       << (v.size() > 0 ? v[0] : 0.f) << ","
+                       << (v.size() > 1 ? v[1] : 0.f) << ","
+                       << (v.size() > 2 ? v[2] : 0.f) << ","
+                       << (v.size() > 3 ? v[3] : 0.f);
+      }
+    }
   }
   return absl::OkStatus();
 }
@@ -957,7 +1053,8 @@ int LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecodeStatic(
     void* arg) {
   auto self = static_cast<LlmLiteRtCompiledModelExecutorBase*>(arg);
   // Run decode with default output_logits.
-  auto status = self->BindTensorsAndRunDecode(/*output_logits=*/nullptr);
+  auto status = self->BindTensorsAndRunDecode(
+      /*output_logits=*/nullptr, self->decode_signature_name_);
   if (!status.ok()) {
     ABSL_LOG(ERROR) << "Failed to bind tensors and run decode: " << status;
   }
@@ -1143,6 +1240,10 @@ absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
 
 absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
     const ExecutorInputs& inputs, const ExecutorDecodeParams& decode_params) {
+  ABSL_LOG(INFO) << "[DBG] DecodeLogits enter: current_step="
+                 << llm_context_->runtime_state().current_step
+                 << " ran_decode="
+                 << llm_context_->runtime_state().ran_decode;
   LITERT_ASSIGN_OR_RETURN(
       auto output_logits,
       decode_output_buffers_[signatures_.output_logits].Duplicate());
@@ -1150,6 +1251,8 @@ absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
   bool last_run_is_decode = llm_context_->runtime_state().ran_decode;
   RETURN_IF_ERROR(PrepareFirstDecode());
   ASSIGN_OR_RETURN(auto step_and_token, GetTokenToDecode(inputs));
+  ABSL_LOG(INFO) << "[DBG] DecodeLogits about to DecodeInternal: token_count="
+                 << step_and_token.token.size();
   RETURN_IF_ERROR(DecodeInternal(step_and_token.token, output_logits));
   RETURN_IF_ERROR(ConsumePendingOrAddProcessedToken(step_and_token.token));
 
@@ -1226,6 +1329,48 @@ absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
         .IgnoreError();
   }
   return output_logits;
+}
+
+absl::StatusOr<std::vector<float>>
+LlmLiteRtCompiledModelExecutorBase::GetAuxiliaryOutput(
+    absl::string_view name) {
+  // decode_output_buffers_ uses string_view keys backed by the compiled
+  // model's signature output names — those storage lifetimes are tied to
+  // the model, not the caller, so we have to look up via the existing keys
+  // rather than constructing a new string_view from the caller's argument.
+  const TensorBuffer* found = nullptr;
+  for (auto& [output_name, buffer] : decode_output_buffers_) {
+    if (output_name == name) {
+      found = &buffer;
+      break;
+    }
+  }
+  if (found == nullptr) {
+    return absl::NotFoundError(absl::StrCat(
+        "Auxiliary output tensor '", name,
+        "' is not declared by the decode signature of the compiled model."));
+  }
+
+  LITERT_ASSIGN_OR_RETURN(auto duplicate, found->Duplicate());
+  LITERT_ASSIGN_OR_RETURN(RankedTensorType tensor_type, duplicate.TensorType());
+  if (tensor_type.ElementType() == ElementType::Float32) {
+    LITERT_ASSIGN_OR_RETURN(auto values,
+                            CopyFromTensorBuffer<float>(duplicate));
+    return values;
+  }
+  if (tensor_type.ElementType() == ElementType::Float16) {
+    LITERT_ASSIGN_OR_RETURN(auto values_f16,
+                            CopyFromTensorBuffer<tflite::half>(duplicate));
+    std::vector<float> widened(values_f16.size());
+    for (size_t i = 0; i < values_f16.size(); ++i) {
+      widened[i] = static_cast<float>(values_f16[i]);
+    }
+    return widened;
+  }
+  return absl::InvalidArgumentError(absl::StrCat(
+      "Auxiliary output '", name,
+      "' has unsupported element type for host readback; expected float32 or "
+      "float16."));
 }
 
 absl::StatusOr<std::string>

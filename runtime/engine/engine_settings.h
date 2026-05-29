@@ -256,6 +256,17 @@ class SessionConfig {
   std::shared_ptr<ScopedFile> GetScopedLoraFile() const;
   void SetScopedLoraFile(std::shared_ptr<ScopedFile> scoped_lora_file);
 
+  // Name of the compiled-model decode signature to invoke for this session.
+  // Defaults to "decode" (the canonical Gemma/LiteRT signature name).
+  // Set to a different name to dispatch to a parallel signature in the same
+  // graph — e.g. a classifier head signature that also takes LoRA inputs.
+  const std::string& GetDecodeSignatureName() const {
+    return decode_signature_name_;
+  }
+  void SetDecodeSignatureName(std::string decode_signature_name) {
+    decode_signature_name_ = std::move(decode_signature_name);
+  }
+
   // The maximum number of tokens to generate in a single request:
   // Getters for the max output tokens.
   int GetMaxOutputTokens() const { return max_output_tokens_; }
@@ -310,6 +321,8 @@ class SessionConfig {
 
   // Scoped file for the LoRA weights.
   std::shared_ptr<ScopedFile> scoped_lora_file_;
+
+  std::string decode_signature_name_ = "decode";
 
   // The maximum number of tokens to generate in a single request. This limits
   // the number of decoding steps for a request, as opposed to

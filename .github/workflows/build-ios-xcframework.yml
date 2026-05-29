@@ -1,0 +1,288 @@
+# Builds every XCFramework the Bouncer iOS app needs to consume LiteRT-LM:
+#
+#   1. CLiteRTLM.xcframework            ← compiled from this fork's source by
+#                                          `bazelisk build //swift:CLiteRTLM`.
+#                                          Reflects all of our C++ + Swift
+#                                          patches.
+#   2. libGemmaModelConstraintProvider  ┐
+#   3. libLiteRt                        │  Wrapped from upstream LFS dylibs
+#   4. libLiteRtMetalAccelerator        │  via `xcodebuild -create-xcframework
+#   5. libLiteRtTopKMetalSampler        ┘  -library`. Independent of our
+#                                          source — they don't change unless
+#                                          upstream LiteRT bumps. We re-emit
+#                                          them every build for parity with
+#                                          Millan's `prefix-cache-v1` release
+#                                          shape, so each release tag has a
+#                                          self-contained set of artifacts.
+#
+# Triggers:
+#   - Pushes to main: builds + uploads as a 30-day workflow artifact.
+#   - Tags `xcframework-*`: builds + creates a release with all 5 .zip files
+#     attached.
+#   - PRs against main: builds + uploads as artifact (validates the source).
+#   - workflow_dispatch: same as above, with release_tag + ref as inputs.
+#
+# Notes:
+#   - libLiteRtTopKMetalSampler ships device-only (upstream provides no
+#     simulator slice). The C++ side dlopens it conditionally on device.
+#   - The four accelerator XCFrameworks are deterministic from upstream LFS
+#     contents; their checksums change only when upstream regenerates the
+#     dylibs.
+
+name: Build iOS XCFramework
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'xcframework-*'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'c/**'
+      - 'runtime/**'
+      - 'schema/**'
+      - 'swift/**'
+      - 'WORKSPACE'
+      - '.bazelrc'
+      - '**/BUILD'
+      - '**/*.bzl'
+      - '.github/workflows/build-ios-xcframework.yml'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: >-
+          Tag to publish under (e.g. `xcframework-aux-output-v1`). Leave empty
+          to skip the release and only upload as a workflow artifact.
+        required: false
+        default: ''
+      ref:
+        description: >-
+          Branch / commit / tag to build. Defaults to the branch the workflow
+          was dispatched on. Useful for building feature branches before merge.
+        required: false
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build XCFrameworks
+    runs-on: macos-latest
+    permissions:
+      contents: write  # Required to create releases + upload assets.
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Checkout without LFS smudge: this fork strips its LFS pointers (see
+      # commit 58977ba), so a smudging checkout will fail. We fetch the iOS
+      # prebuilts from upstream in a later step instead.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          lfs: false
+
+      - name: Install bazelisk
+        run: brew install bazelisk
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      # Bazel's external repo cache + build output is the single biggest cost
+      # driver. Cache it across runs keyed on WORKSPACE + BUILD-file hashes so
+      # source-only edits land in the cache.
+      - name: Bazel disk cache
+        id: bazel-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel-ios-xcframework
+          key: bazel-ios-xcframework-${{ hashFiles('WORKSPACE', '.bazelrc', '**/BUILD*', '**/*.bzl') }}-${{ github.sha }}
+          restore-keys: |
+            bazel-ios-xcframework-${{ hashFiles('WORKSPACE', '.bazelrc', '**/BUILD*', '**/*.bzl') }}-
+            bazel-ios-xcframework-
+
+      # Restore the GPU/accelerator dylibs that Millan stripped to unblock SPM
+      # checkout. They live in upstream's LFS storage; we pull them from there
+      # and copy them into this fork's `prebuilt/` directory. They're both
+      # build-time link inputs for bazel AND the source from which we wrap the
+      # four accelerator XCFrameworks below.
+      - name: Fetch iOS prebuilt dylibs from upstream
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          git clone --depth 1 https://github.com/google-ai-edge/LiteRT-LM upstream-prebuilts
+          cd upstream-prebuilts
+          git lfs install
+          git lfs pull --include "prebuilt/ios_arm64/*,prebuilt/ios_sim_arm64/*"
+          mkdir -p "$GITHUB_WORKSPACE/prebuilt"
+          cp -R prebuilt/ios_arm64 "$GITHUB_WORKSPACE/prebuilt/"
+          cp -R prebuilt/ios_sim_arm64 "$GITHUB_WORKSPACE/prebuilt/"
+          echo "=== device dylibs ===" && ls -lh "$GITHUB_WORKSPACE/prebuilt/ios_arm64/" || true
+          echo "=== simulator dylibs ===" && ls -lh "$GITHUB_WORKSPACE/prebuilt/ios_sim_arm64/" || true
+
+      - name: Smoke test - bazel query //swift:CLiteRTLM
+        run: bazelisk query //swift:CLiteRTLM
+
+      - name: Build //swift:CLiteRTLM
+        run: |
+          bazelisk build \
+            --disk_cache=$HOME/.cache/bazel-ios-xcframework \
+            //swift:CLiteRTLM
+
+      # Wrap the four accelerator dylibs into library-style XCFrameworks. The
+      # library-style form (raw .dylib, not Frameworks/X.framework/X) is what
+      # iOS AMFI accepts after Xcode's Embed & Sign on a real device. See
+      # commit 6186155 for the AMFI rationale.
+      - name: Wrap accelerator dylibs as XCFrameworks
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          PREBUILT="$GITHUB_WORKSPACE/prebuilt"
+
+          # 3 libs ship for both device and simulator.
+          for lib in libGemmaModelConstraintProvider libLiteRt libLiteRtMetalAccelerator; do
+            echo "::group::Wrapping ${lib}"
+            xcodebuild -create-xcframework \
+              -library "$PREBUILT/ios_arm64/${lib}.dylib" \
+              -library "$PREBUILT/ios_sim_arm64/${lib}.dylib" \
+              -output "out/${lib}.xcframework"
+            ditto -c -k --sequesterRsrc --keepParent \
+              "out/${lib}.xcframework" \
+              "out/${lib}.xcframework.zip"
+            echo "::endgroup::"
+          done
+
+          # libLiteRtTopKMetalSampler: device-only (no simulator slice in
+          # upstream prebuilts). The C++ side dlopens it conditionally on
+          # device; sim builds tolerate its absence.
+          echo "::group::Wrapping libLiteRtTopKMetalSampler (device-only)"
+          xcodebuild -create-xcframework \
+            -library "$PREBUILT/ios_arm64/libLiteRtTopKMetalSampler.dylib" \
+            -output "out/libLiteRtTopKMetalSampler.xcframework"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "out/libLiteRtTopKMetalSampler.xcframework" \
+            "out/libLiteRtTopKMetalSampler.xcframework.zip"
+          echo "::endgroup::"
+
+      - name: Stage CLiteRTLM artifact
+        run: |
+          set -euo pipefail
+          cp bazel-bin/swift/CLiteRTLM.xcframework.zip out/
+
+      - name: Compute checksums + sizes
+        id: checksums
+        run: |
+          set -euo pipefail
+          cd out
+          {
+            echo "## Built XCFrameworks"
+            echo ""
+            echo "| Artifact | Size | SHA256 |"
+            echo "|---|---|---|"
+          } > /tmp/built-summary.md
+          for f in *.xcframework.zip; do
+            CHECKSUM=$(swift package compute-checksum "$f")
+            SIZE=$(stat -f%z "$f")
+            NAME="${f%.xcframework.zip}"
+            # Normalize hyphens to underscores so the name is a valid step output key.
+            SAFE_KEY="$(echo "$NAME" | tr '-' '_')"
+            echo "${SAFE_KEY}_checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
+            echo "${SAFE_KEY}_size=$SIZE" >> "$GITHUB_OUTPUT"
+            echo "| \`$f\` | $SIZE | \`$CHECKSUM\` |" >> /tmp/built-summary.md
+            echo "$f  size=$SIZE  sha256=$CHECKSUM"
+          done
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcframeworks
+          path: out/*.xcframework.zip
+          retention-days: 30
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to GitHub release
+        if: steps.tag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          BUILT_FROM="${GITHUB_SHA}"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release '$TAG' exists — uploading assets with --clobber."
+          else
+            NOTES=$(printf "Built from \`%s\` at %s.\n\nContents — replace your \`Package.swift\` binaryTarget URLs and checksums with the values below.\n\n%s" "$BUILT_FROM" "$BUILT_AT" "$(cat /tmp/built-summary.md)")
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "iOS XCFrameworks: $TAG" \
+              --notes "$NOTES"
+          fi
+          gh release upload "$TAG" out/*.xcframework.zip \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Job summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## iOS XCFramework build"
+            echo ""
+            echo "**Commit:** \`${GITHUB_SHA}\`"
+            echo ""
+            cat /tmp/built-summary.md
+            if [ -n "${{ steps.tag.outputs.tag }}" ]; then
+              TAG="${{ steps.tag.outputs.tag }}"
+              echo ""
+              echo "### Published release: \`$TAG\`"
+              echo ""
+              echo "Copy this block into your iOS app's \`Package.swift\`:"
+              echo ""
+              echo '```swift'
+              echo '.binaryTarget('
+              echo '  name: "CLiteRTLM",'
+              echo "  url: \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/CLiteRTLM.xcframework.zip\","
+              echo "  checksum: \"${{ steps.checksums.outputs.CLiteRTLM_checksum }}\""
+              echo '),'
+              echo '.binaryTarget('
+              echo '  name: "libGemmaModelConstraintProvider",'
+              echo "  url: \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/libGemmaModelConstraintProvider.xcframework.zip\","
+              echo "  checksum: \"${{ steps.checksums.outputs.libGemmaModelConstraintProvider_checksum }}\""
+              echo '),'
+              echo '.binaryTarget('
+              echo '  name: "libLiteRt",'
+              echo "  url: \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/libLiteRt.xcframework.zip\","
+              echo "  checksum: \"${{ steps.checksums.outputs.libLiteRt_checksum }}\""
+              echo '),'
+              echo '.binaryTarget('
+              echo '  name: "libLiteRtMetalAccelerator",'
+              echo "  url: \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/libLiteRtMetalAccelerator.xcframework.zip\","
+              echo "  checksum: \"${{ steps.checksums.outputs.libLiteRtMetalAccelerator_checksum }}\""
+              echo '),'
+              echo '.binaryTarget('
+              echo '  name: "libLiteRtTopKMetalSampler",'
+              echo "  url: \"https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/libLiteRtTopKMetalSampler.xcframework.zip\","
+              echo "  checksum: \"${{ steps.checksums.outputs.libLiteRtTopKMetalSampler_checksum }}\""
+              echo '),'
+              echo '```'
+            else
+              echo ""
+              echo "_No release tag specified — artifacts are available as a workflow attachment only._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

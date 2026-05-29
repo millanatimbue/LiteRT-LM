@@ -59,10 +59,24 @@ class LoraManager {
   // doesn't exist, it will be created.
   absl::Status UseLoRA(uint32_t lora_id);
 
+  // Resets the current LoRA so subsequent GetLoRABuffers() calls report no
+  // active LoRA. Loaded LoRAs remain available — switch back with UseLoRA().
+  void ClearCurrentLoRA() { current_lora_id_ = std::nullopt; }
+
   // Returns a map of all the LoRA tensor names to their duplicated
-  // TensorBuffers for the current LoRA ID.
+  // TensorBuffers for the current LoRA ID, defaulting to the "decode"
+  // signature's buffer set. Kept for back-compat with callers that don't
+  // know or care which signature they're binding to.
   absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
   GetLoRABuffers() const;
+
+  // Returns the LoRA tensor buffers populated for the given `signature`. The
+  // active LoRA's Init() populates one buffer set per (decode + each prefill_*)
+  // signature; callers binding LoRA tensors into a specific signature's
+  // input map must pass that signature's name here so the returned buffers
+  // are compatible with LiteRT's per-signature buffer-type requirements.
+  absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
+  GetLoRABuffers(absl::string_view signature) const;
 
  private:
   explicit LoraManager(const litert::CompiledModel& compiled_model);

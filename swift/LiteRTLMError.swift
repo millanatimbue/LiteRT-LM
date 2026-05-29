@@ -74,6 +74,7 @@ public enum LiteRTLMError: Error, LocalizedError, Equatable {
     case benchmarkNotEnabled
     case benchmarkInfoUnavailable
     case failedToCloneConversation
+    case auxiliaryOutputUnavailable(name: String)
 
     public var errorDescription: String? {
       switch self {
@@ -100,6 +101,12 @@ public enum LiteRTLMError: Error, LocalizedError, Equatable {
         return "Failed to get benchmark info."
       case .failedToCloneConversation:
         return "Failed to clone the conversation (native call returned NULL)."
+      case .auxiliaryOutputUnavailable(let name):
+        return """
+          Auxiliary output tensor '\(name)' is not available. The model graph \
+          must declare it as an output of the decode signature, and a model \
+          response must have been generated at least once before reading.
+          """
       }
     }
   }
@@ -111,6 +118,7 @@ public enum LiteRTLMError: Error, LocalizedError, Equatable {
     case invalidTopP
     case invalidTemperature
     case multipleSystemMessages
+    case invalidLoraFile(path: String)
 
     public var errorDescription: String? {
       switch self {
@@ -126,6 +134,8 @@ public enum LiteRTLMError: Error, LocalizedError, Equatable {
         return "temperature should be non-negative"
       case .multipleSystemMessages:
         return "Cannot set both systemMessage and have system messages in initialMessages."
+      case .invalidLoraFile(let path):
+        return "Failed to open LoRA adapter file at \(path)."
       }
     }
   }

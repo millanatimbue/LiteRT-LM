@@ -33,6 +33,7 @@
 #include "litert/cc/litert_environment_options.h"  // from @litert
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
+#include "runtime/components/lora_manager.h"
 #include "runtime/components/model_resources.h"
 #include "runtime/engine/engine_settings.h"
 #include "runtime/engine/io_types.h"
@@ -401,6 +402,22 @@ class LockedLlmExecutor : public LlmExecutor {
     return llm_executor_->SetCurrentStep(new_step);
   }
 
+  // Forward GetAuxiliaryOutput to the wrapped executor. Without this override,
+  // the base LlmExecutor::GetAuxiliaryOutput is hit (UnimplementedError), so
+  // SerialExecutionManager / ThreadedExecutionManager can never reach the
+  // LiteRT compiled-model executor's actual implementation.
+  absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+      absl::string_view name) override {
+    return llm_executor_->GetAuxiliaryOutput(name);
+  }
+
+  // Forward LoRA manager access so callers (LoraManager / decode-time LoRA
+  // merging) get the wrapped executor's manager instead of nullptr from the
+  // base.
+  LoraManager* lora_manager() override {
+    return llm_executor_->lora_manager();
+  }
+
   absl::StatusOr<const ProcessedTokens*> GetProcessedTokens() const override {
     return llm_executor_->GetProcessedTokens();
   }
@@ -543,8 +560,36 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
     ASSIGN_OR_RETURN(ModelAssets model_assets,
                      ModelAssets::Create(session_config.GetScopedLoraFile(),
                                          /*model_path=*/""));
-    return absl::InvalidArgumentError("Lora is not supported.");
+    LoraManager* lora_mgr = llm_executor_->lora_manager();
+    if (lora_mgr == nullptr) {
+      return absl::UnimplementedError(
+          "LoRA load requested but executor backend has no LoraManager.");
+    }
+    RETURN_IF_ERROR(lora_mgr->LoadLoRA(*lora_id, model_assets));
+    RETURN_IF_ERROR(lora_mgr->UseLoRA(*lora_id));
+  } else if (!lora_id.has_value()) {
+    // No scoped LoRA on this session — explicitly clear any LoRA the executor
+    // had bound from a previous session. LoraManager's `current_lora_id_` is
+    // engine-scoped (not session-scoped), so without this clear a chat-style
+    // session that follows a LoRA-using session inherits the previous LoRA
+    // and the model produces garbage (e.g. repeating `.\n` for Gemma 4 IT
+    // running under the classifier's LoRA).
+    if (LoraManager* lora_mgr = llm_executor_->lora_manager()) {
+      lora_mgr->ClearCurrentLoRA();
+    }
   }
+  // Log whether this session is running with LoRA. Useful when verifying
+  // that classifier sessions actually apply LoRA and chat sessions don't.
+  if (LoraManager* lora_mgr = llm_executor_->lora_manager()) {
+    ABSL_LOG(INFO) << "[LoRA-DBG] CreateContextHandler: session has_scoped_lora="
+                   << (session_config.GetScopedLoraFile() != nullptr)
+                   << " executor_current_lora_id="
+                   << (lora_mgr->GetCurrentLoRAId().has_value()
+                           ? absl::StrCat(*lora_mgr->GetCurrentLoRAId())
+                           : std::string("none"));
+  }
+
+  llm_executor_->SetDecodeSignatureName(session_config.GetDecodeSignatureName());
 
   auto runtime_config = RuntimeConfig{
     .output_heads = session_config.GetNumOutputCandidates(),
