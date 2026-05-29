@@ -29,6 +29,7 @@
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/time/time.h"  // from @com_google_absl
+#include "litert/cc/internal/scoped_file.h"  // from @litert
 #include "nlohmann/json.hpp"  // from @nlohmann_json
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
@@ -279,6 +280,27 @@ void litert_lm_session_config_set_apply_prompt_template(
   if (config && config->config) {
     config->config->SetApplyPromptTemplateInSession(apply_prompt_template);
   }
+}
+
+bool litert_lm_session_config_set_scoped_lora_file(
+    LiteRtLmSessionConfig* config, const char* path) {
+  if (!config || !config->config) {
+    return false;
+  }
+  if (path == nullptr || path[0] == '\0') {
+    // Clear the LoRA file.
+    config->config->SetScopedLoraFile(nullptr);
+    return true;
+  }
+  auto scoped = ::litert::ScopedFile::Open(path);
+  if (!scoped.ok()) {
+    ABSL_LOG(ERROR) << "Failed to open LoRA adapter at " << path << ": "
+                    << scoped.status();
+    return false;
+  }
+  auto shared = std::make_shared<::litert::ScopedFile>(*std::move(scoped));
+  config->config->SetScopedLoraFile(shared);
+  return true;
 }
 
 void litert_lm_session_config_set_sampler_params(

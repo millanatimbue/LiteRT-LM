@@ -118,6 +118,7 @@ public enum LiteRTLMError: Error, LocalizedError, Equatable {
     case invalidTopP
     case invalidTemperature
     case multipleSystemMessages
+    case invalidLoraFile(path: String)
 
     public var errorDescription: String? {
       switch self {
@@ -133,6 +134,8 @@ public enum LiteRTLMError: Error, LocalizedError, Equatable {
         return "temperature should be non-negative"
       case .multipleSystemMessages:
         return "Cannot set both systemMessage and have system messages in initialMessages."
+      case .invalidLoraFile(let path):
+        return "Failed to open LoRA adapter file at \(path)."
       }
     }
   }
