@@ -981,6 +981,22 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
                          : std::string("none"))
                  << " lora_manager_set="
                  << (lora_manager_ != nullptr);
+  // Dump classifier_logits BEFORE we run decode so we can tell whether
+  // the call mutates the buffer or leaves stale state from a prior run.
+  for (const auto& [name, buf] : decode_output_buffers_) {
+    if (name == "classifier_logits") {
+      LITERT_ASSIGN_OR_RETURN(auto dup, buf.Duplicate());
+      auto vals = CopyFromTensorBuffer<float>(dup);
+      if (vals.HasValue()) {
+        const auto& v = vals.Value();
+        ABSL_LOG(INFO) << "[AUX-DBG] pre-decode classifier_logits[0..3]="
+                       << (v.size() > 0 ? v[0] : 0.f) << ","
+                       << (v.size() > 1 ? v[1] : 0.f) << ","
+                       << (v.size() > 2 ? v[2] : 0.f) << ","
+                       << (v.size() > 3 ? v[3] : 0.f);
+      }
+    }
+  }
   if (lora_manager_ != nullptr && decode_lora_id.has_value()) {
     ASSIGN_OR_RETURN(auto lora_buffers,
                      lora_manager_->GetLoRABuffers(signature_name));
@@ -1012,6 +1028,23 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
 
   if (!gpu_optimized_single_buffer_cache_) {
     std::swap(input_kv_cache_buffers_, output_kv_cache_buffers_);
+  }
+  // Dump classifier_logits AFTER decode to confirm whether the runtime
+  // actually wrote new values. If post == pre, the model graph isn't
+  // producing classifier output (or the write got dropped).
+  for (const auto& [name, buf] : decode_output_buffers_) {
+    if (name == "classifier_logits") {
+      LITERT_ASSIGN_OR_RETURN(auto dup, buf.Duplicate());
+      auto vals = CopyFromTensorBuffer<float>(dup);
+      if (vals.HasValue()) {
+        const auto& v = vals.Value();
+        ABSL_LOG(INFO) << "[AUX-DBG] post-decode classifier_logits[0..3]="
+                       << (v.size() > 0 ? v[0] : 0.f) << ","
+                       << (v.size() > 1 ? v[1] : 0.f) << ","
+                       << (v.size() > 2 ? v[2] : 0.f) << ","
+                       << (v.size() > 3 ? v[3] : 0.f);
+      }
+    }
   }
   return absl::OkStatus();
 }
