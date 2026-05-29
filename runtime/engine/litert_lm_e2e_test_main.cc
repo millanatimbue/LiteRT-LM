@@ -48,6 +48,8 @@
 //     --backend=cpu \
 //     --iterations=20
 
+#include <sys/resource.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -95,6 +97,10 @@ ABSL_FLAG(std::string, mode, "interleave",
           "(N classifier calls back-to-back, no chat base), "
           "'classifier_after_chat' (build chat base, then N classifier "
           "calls — no chat clones).");
+ABSL_FLAG(bool, double_engine, false,
+          "If true, build TWO engines pointing at the same model file and "
+          "report RSS after each. Used to measure whether mmap'd file "
+          "pages are physically shared between the two engines.");
 ABSL_FLAG(std::string, system_message,
           "You are a moderation classifier. For each post, output exactly "
           "one row of pipe-delimited verdicts (yes or no), one per "
@@ -130,6 +136,29 @@ constexpr const char* kPrompts[] = {
 };
 constexpr int kNumPrompts =
     sizeof(kPrompts) / sizeof(const char*);
+
+// Report the process's resident set size. On macOS, ru_maxrss is reported
+// in *bytes* (Linux returns kilobytes; that branch is unused here but kept
+// correct for portability). RSS includes mmap'd file-backed pages that are
+// currently resident; if two engines mmap the same file, the kernel
+// reference-counts the underlying physical pages and the process's RSS only
+// grows by per-engine writable state, NOT by another model's worth.
+long ProcessRssBytes() {
+  struct rusage usage;
+  if (getrusage(RUSAGE_SELF, &usage) != 0) return -1;
+#ifdef __APPLE__
+  return usage.ru_maxrss;
+#else
+  return usage.ru_maxrss * 1024L;
+#endif
+}
+
+void PrintRss(absl::string_view label) {
+  long bytes = ProcessRssBytes();
+  std::cout << "[RSS] " << label << ": " << (bytes / (1024.0 * 1024.0))
+            << " MiB (max so far)\n"
+            << std::flush;
+}
 
 // Returns true if `output` looks like a legitimate verdict-row response
 // (not pure padding, not all dots-with-newlines). The padding mode we saw
@@ -281,15 +310,28 @@ absl::Status MainHelper(int argc, char** argv) {
 
   ASSIGN_OR_RETURN(Backend backend,
                    litert::lm::GetBackendFromString(backend_str));
-  ASSIGN_OR_RETURN(ModelAssets model_assets,  // NOLINT
-                   ModelAssets::Create(model_path));
-  ASSIGN_OR_RETURN(EngineSettings engine_settings,
-                   EngineSettings::CreateDefault(std::move(model_assets),
-                                                 backend));
-  ASSIGN_OR_RETURN(auto engine, litert::lm::EngineFactory::Create(
-                                    litert::lm::EngineFactory::EngineType::
-                                        kAdvancedLiteRTCompiledModel,
-                                    std::move(engine_settings)));
+
+  auto build_engine = [&]() -> absl::StatusOr<std::unique_ptr<litert::lm::Engine>> {
+    ASSIGN_OR_RETURN(ModelAssets assets, ModelAssets::Create(model_path));
+    ASSIGN_OR_RETURN(EngineSettings s, EngineSettings::CreateDefault(
+                                          std::move(assets), backend));
+    return litert::lm::EngineFactory::Create(
+        litert::lm::EngineFactory::EngineType::kAdvancedLiteRTCompiledModel,
+        std::move(s));
+  };
+
+  PrintRss("before engine 1");
+  ASSIGN_OR_RETURN(auto engine, build_engine());
+  PrintRss("after engine 1");
+
+  // Second engine: pointed at the same model_path. If LiteRT's mmap really
+  // shares file-backed physical pages, RSS should grow by per-engine state
+  // only (~tens of MiB) — not by another model's worth (~3.9 GiB).
+  std::unique_ptr<litert::lm::Engine> engine2;
+  if (absl::GetFlag(FLAGS_double_engine)) {
+    ASSIGN_OR_RETURN(engine2, build_engine());
+    PrintRss("after engine 2");
+  }
 
   const std::string mode = absl::GetFlag(FLAGS_mode);
   std::cout << "[e2e] backend=" << backend_str << " iterations=" << iterations
@@ -319,6 +361,7 @@ absl::Status MainHelper(int argc, char** argv) {
       std::cout << "  sane=" << LogitsLookSane(*logits) << "\n";
       if (!LogitsLookSane(*logits)) ++failures;
     }
+    PrintRss("after classifier runs");
     std::cout << "[e2e] done. failures=" << failures << "/" << iterations
               << "\n";
     if (failures > 0)
