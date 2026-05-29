@@ -90,23 +90,36 @@ class LoRA {
        const litert::CompiledModel& compiled_model)
       : lora_data_(std::move(lora_data)), compiled_model_(compiled_model) {}
 
-  // Initializes the LoRA object by enumerating compiled-model signatures
-  // (decode + any prefill_*) and creating TensorBuffers for each signature's
-  // LoRA inputs, populated from the LoraData payload.
+  // Initializes the LoRA object by populating the decode signature's LoRA
+  // tensor buffers (the canonical signature LoRA inputs were always allocated
+  // against). Prefill signatures are filled lazily on first
+  // GetLoRABuffers(prefill_signature) call.
+  //
+  // Why not eager: calling CreateInputBuffer(prefill_signature, name) on a
+  // GPU-compiled prefill subgraph registers the resulting non-CPU buffer in
+  // the subgraph's custom_allocations_ list. A subsequent Run on that same
+  // prefill signature (e.g. a chat session that does NOT use LoRA) trips a
+  // TF_LITE_ENSURE assertion in subgraph.cc that expects
+  // allocation_type == kTfLiteCustom (6) but finds kTfLiteNonCpu (8). Lazy
+  // fill keeps LoRA-using sessions correct without polluting prefill state
+  // for non-LoRA sessions.
   absl::Status Init();
 
   // Populate per_signature_lora_buffers_[signature] with one buffer per LoRA
   // input declared by `signature`. Copies the same lora_data_ bytes into each
-  // signature's buffer (or zeros if the tensor isn't in LoraData).
-  absl::Status InitForSignature(absl::string_view signature);
+  // signature's buffer (or zeros if the tensor isn't in LoraData). `mutable`
+  // on the data members lets GetLoRABuffers(prefill_signature) call this on a
+  // const LoRA — the lazy fill is logically idempotent caching.
+  absl::Status InitForSignature(absl::string_view signature) const;
 
   std::unique_ptr<LoraData> lora_data_;
   const litert::CompiledModel& compiled_model_;
   // Outer key: signature name ("decode", "prefill", "prefill_128", ...).
   // Inner key: LoRA tensor name. Stored owning the std::string keys so callers
   // can use absl::string_view safely against the lifetime of this object.
-  absl::flat_hash_map<std::string,
-                      absl::flat_hash_map<std::string, litert::TensorBuffer>>
+  // `mutable` so GetLoRABuffers can lazy-fill prefill signatures.
+  mutable absl::flat_hash_map<
+      std::string, absl::flat_hash_map<std::string, litert::TensorBuffer>>
       per_signature_lora_buffers_;
 };
 

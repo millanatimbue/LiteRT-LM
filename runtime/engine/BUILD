@@ -294,6 +294,53 @@ cc_binary(
 )
 
 cc_binary(
+    name = "litert_lm_e2e_test_main",
+    srcs = ["litert_lm_e2e_test_main.cc"],
+    additional_linker_inputs = select({
+        "@platforms//os:windows": [
+            "@litert//litert/c:windows_exported_symbols.def",
+        ],
+        "@platforms//os:linux": [":litert_lm_main.exported_symbols"],
+        "//conditions:default": [],
+    }),
+    linkopts = select({
+        "@litert//litert:litert_link_capi_so": [],
+        "@platforms//os:ios": ["-Wl,-exported_symbol,_LiteRt*"],
+        "@platforms//os:macos": ["-Wl,-exported_symbol,_LiteRt*"],
+        "@platforms//os:windows": [
+            "/DEF:$(location @litert//litert/c:windows_exported_symbols.def)",
+        ],
+        "@platforms//os:linux": ["-Wl,--dynamic-list=$(location :litert_lm_main.exported_symbols)"],
+        "//conditions:default": ["-Wl,--export-dynamic-symbol=LiteRt*"],
+    }) + select({
+        "@platforms//os:android": ["-lEGL", "-lGLESv3"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":engine_factory",
+        ":engine_impl_selected",
+        ":engine_interface",
+        ":engine_settings",
+        ":io_types",
+        "@com_google_absl//absl/base:log_severity",
+        "@com_google_absl//absl/flags:flag",
+        "@com_google_absl//absl/flags:parse",
+        "@com_google_absl//absl/log:absl_check",
+        "@com_google_absl//absl/log:globals",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/time",
+        "@nlohmann_json//:json",
+        "@litert//litert/cc/internal:scoped_file",
+        "//runtime/conversation",
+        "//runtime/conversation:io_types",
+        "//runtime/executor:executor_settings_base",
+        "//runtime/util:litert_status_util",
+    ],
+)
+
+cc_binary(
     name = "litert_lm_advanced_main",
     srcs = ["litert_lm_advanced_main.cc"],
     additional_linker_inputs = select({

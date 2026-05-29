@@ -748,6 +748,13 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
   // it returns buffers shaped for this specific signature's runner.
   const std::optional<uint32_t> prefill_lora_id =
       llm_context_->processed_context().lora_id();
+  ABSL_LOG(INFO) << "[LoRA-DBG] BindTensorsAndRunPrefill: signature="
+                 << prefill_signature << " context_lora_id="
+                 << (prefill_lora_id.has_value()
+                         ? absl::StrCat(*prefill_lora_id)
+                         : std::string("none"))
+                 << " lora_manager_set="
+                 << (lora_manager_ != nullptr);
   if (lora_manager_ != nullptr && prefill_lora_id.has_value()) {
     ASSIGN_OR_RETURN(auto lora_buffers,
                      lora_manager_->GetLoRABuffers(prefill_signature));
@@ -967,6 +974,13 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
   // signature — required for LiteRT's per-signature buffer-type compatibility.
   const std::optional<uint32_t> decode_lora_id =
       llm_context_->processed_context().lora_id();
+  ABSL_LOG(INFO) << "[LoRA-DBG] BindTensorsAndRunDecode: signature="
+                 << signature_name << " context_lora_id="
+                 << (decode_lora_id.has_value()
+                         ? absl::StrCat(*decode_lora_id)
+                         : std::string("none"))
+                 << " lora_manager_set="
+                 << (lora_manager_ != nullptr);
   if (lora_manager_ != nullptr && decode_lora_id.has_value()) {
     ASSIGN_OR_RETURN(auto lora_buffers,
                      lora_manager_->GetLoRABuffers(signature_name));

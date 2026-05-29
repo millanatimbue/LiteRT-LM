@@ -54,38 +54,13 @@ absl::StatusOr<std::unique_ptr<LoRA>> LoRA::Create(
 }
 
 absl::Status LoRA::Init() {
-  // Discover every signature the compiled model exposes. We populate buffers
-  // for the decode signature (always present) and every prefill_* signature
-  // (one per supported prefill chunk length). LiteRT requires that input
-  // buffers be created via CreateInputBuffer(signature, name) for the
-  // specific signature they'll be passed to — buffers created against one
-  // signature have a backend type / memory layout that another signature's
-  // runner will reject with "The given buffer type is not supported".
-  LITERT_ASSIGN_OR_RETURN(auto signature_keys,
-                          compiled_model_.GetSignatureKeys());
-
-  bool found_decode = false;
-  for (const auto& key_sv : signature_keys) {
-    absl::string_view key(key_sv.data(), key_sv.size());
-    const bool is_decode = (key == kDecodeSignatureRunner);
-    const bool is_prefill = absl::StartsWith(key, kPrefillSignaturePrefix);
-    if (!is_decode && !is_prefill) {
-      continue;
-    }
-    if (is_decode) {
-      found_decode = true;
-    }
-    RETURN_IF_ERROR(InitForSignature(key));
-  }
-
-  if (!found_decode) {
-    return absl::FailedPreconditionError(
-        "Model does not expose a 'decode' signature; cannot initialize LoRA.");
-  }
-  return absl::OkStatus();
+  // Eagerly populate only the decode signature. Prefill signatures get filled
+  // lazily on first GetLoRABuffers(prefill_signature) call — see comment in
+  // lora.h on why eager prefill fill breaks chat sessions on GPU backends.
+  return InitForSignature(kDecodeSignatureRunner);
 }
 
-absl::Status LoRA::InitForSignature(absl::string_view signature) {
+absl::Status LoRA::InitForSignature(absl::string_view signature) const {
   LITERT_ASSIGN_OR_RETURN(
       auto input_names, compiled_model_.GetSignatureInputNames(signature));
 
@@ -149,6 +124,26 @@ LoRA::GetLoRABuffers() const {
 absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
 LoRA::GetLoRABuffers(absl::string_view signature) const {
   auto sig_it = per_signature_lora_buffers_.find(signature);
+  if (sig_it == per_signature_lora_buffers_.end()) {
+    // Lazy-fill on first request. The decode signature is always populated
+    // at Init time; prefill signatures wait until a session that actually
+    // binds LoRA on prefill asks for them. Only accept signatures that look
+    // like prefill (or decode, defensively) — refuse arbitrary names so a
+    // misspelled caller doesn't silently allocate buffers for a wrong graph.
+    const bool is_decode = (signature == kDecodeSignatureRunner);
+    const bool is_prefill =
+        absl::StartsWith(signature, kPrefillSignaturePrefix);
+    if (!is_decode && !is_prefill) {
+      return absl::NotFoundError(
+          absl::StrCat("Cannot populate LoRA buffers for unrecognized "
+                       "signature '",
+                       signature,
+                       "'. Only 'decode' and 'prefill*' signatures are "
+                       "supported."));
+    }
+    RETURN_IF_ERROR(InitForSignature(signature));
+    sig_it = per_signature_lora_buffers_.find(signature);
+  }
   if (sig_it == per_signature_lora_buffers_.end()) {
     return absl::NotFoundError(
         absl::StrCat("No LoRA buffers populated for signature '", signature,
