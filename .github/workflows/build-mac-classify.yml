@@ -1,0 +1,195 @@
+# Builds the macOS arm64 `litert_lm_classify_main` CLI binary so the iOS
+# classification pipeline (setScopedLoraFile + sendMessage(max_output_tokens=1)
+# + GetAuxiliaryOutput("classifier_logits")) can be exercised and debugged
+# from a Mac without an iOS device or simulator.
+#
+# Triggers:
+#   - Pushes / PRs that touch the runtime or the CLI source.
+#   - Tags `classify-main-mac-*` for tagged releases.
+#   - workflow_dispatch for manual runs (optional ref + release_tag inputs).
+#
+# Output:
+#   - Workflow artifact `mac-classify-main` containing `litert_lm_classify_main`.
+#   - On tag push (or dispatch with release_tag), an attached release asset.
+
+name: Build macOS classify CLI
+
+on:
+  push:
+    branches:
+      - main
+      - expose-aux-tensor-outputs
+    tags:
+      - 'classify-main-mac-*'
+    paths:
+      - 'c/**'
+      - 'runtime/**'
+      - 'schema/**'
+      - 'WORKSPACE'
+      - '.bazelrc'
+      - '**/BUILD'
+      - '**/*.bzl'
+      - '.github/workflows/build-mac-classify.yml'
+  pull_request:
+    branches:
+      - main
+      - expose-aux-tensor-outputs
+    paths:
+      - 'c/**'
+      - 'runtime/**'
+      - 'schema/**'
+      - 'WORKSPACE'
+      - '.bazelrc'
+      - '**/BUILD'
+      - '**/*.bzl'
+      - '.github/workflows/build-mac-classify.yml'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: >-
+          Tag to publish under (e.g. `classify-main-mac-v1`). Leave empty
+          to skip the release and only upload as a workflow artifact.
+        required: false
+        default: ''
+      ref:
+        description: >-
+          Branch / commit / tag to build. Defaults to the branch the workflow
+          was dispatched on.
+        required: false
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build classify CLI (macOS arm64)
+    runs-on: macos-latest
+    permissions:
+      contents: write  # Required to create releases + upload assets.
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          lfs: false
+
+      - name: Install bazelisk
+        run: brew install bazelisk
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Bazel disk cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel-mac-classify
+          key: bazel-mac-classify-${{ hashFiles('WORKSPACE', '.bazelrc', '**/BUILD*', '**/*.bzl') }}-${{ github.sha }}
+          restore-keys: |
+            bazel-mac-classify-${{ hashFiles('WORKSPACE', '.bazelrc', '**/BUILD*', '**/*.bzl') }}-
+            bazel-mac-classify-
+
+      - name: Smoke test - bazel query target
+        run: bazelisk query //runtime/engine:litert_lm_classify_main
+
+      - name: Build //runtime/engine:litert_lm_classify_main
+        run: |
+          bazelisk build \
+            --config=macos_arm64 \
+            --disk_cache=$HOME/.cache/bazel-mac-classify \
+            -c opt \
+            //runtime/engine:litert_lm_classify_main
+
+      - name: Stage binary
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp bazel-bin/runtime/engine/litert_lm_classify_main out/
+          chmod +x out/litert_lm_classify_main
+          # `otool -L` for traceability if anything dynamic links unexpectedly.
+          otool -L out/litert_lm_classify_main || true
+          file out/litert_lm_classify_main || true
+          ls -lh out/
+
+      - name: Compute checksum + size
+        id: checksum
+        run: |
+          set -euo pipefail
+          cd out
+          BIN=litert_lm_classify_main
+          SHA=$(shasum -a 256 "$BIN" | awk '{print $1}')
+          SIZE=$(stat -f%z "$BIN")
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Built binary"
+            echo ""
+            echo "| Artifact | Size | SHA256 |"
+            echo "|---|---|---|"
+            echo "| \`$BIN\` | $SIZE | \`$SHA\` |"
+          } > /tmp/built-summary.md
+
+      - name: Upload as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-classify-main
+          path: out/litert_lm_classify_main
+          retention-days: 30
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_tag }}" ]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to GitHub release
+        if: steps.tag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          BUILT_FROM="${GITHUB_SHA}"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release '$TAG' exists — uploading assets with --clobber."
+          else
+            NOTES=$(printf "macOS arm64 build of \`litert_lm_classify_main\`.\n\nBuilt from \`%s\` at %s.\n\n%s" "$BUILT_FROM" "$BUILT_AT" "$(cat /tmp/built-summary.md)")
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "classify_main (macOS arm64): $TAG" \
+              --notes "$NOTES"
+          fi
+          gh release upload "$TAG" out/litert_lm_classify_main \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Job summary
+        run: |
+          set -euo pipefail
+          {
+            echo "## macOS classify_main build"
+            echo ""
+            echo "**Commit:** \`${GITHUB_SHA}\`"
+            echo ""
+            cat /tmp/built-summary.md
+            echo ""
+            echo "Use locally with:"
+            echo ""
+            echo '```bash'
+            echo './litert_lm_classify_main \\'
+            echo '  --model_path=/path/to/model.litertlm \\'
+            echo '  --lora_path=/path/to/lora_adapter.tflite \\'
+            echo '  --input_prompt="text to classify" \\'
+            echo '  --backend=cpu'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

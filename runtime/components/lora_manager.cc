@@ -77,4 +77,15 @@ LoraManager::GetLoRABuffers() const {
   return loras_.at(*current_lora_id_)->GetLoRABuffers();
 }
 
+absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
+LoraManager::GetLoRABuffers(absl::string_view signature) const {
+  if (!current_lora_id_.has_value()) {
+    return absl::FailedPreconditionError("No LoRA ID is set");
+  }
+  if (!loras_.contains(*current_lora_id_)) {
+    return absl::NotFoundError("LoRA ID not found");
+  }
+  return loras_.at(*current_lora_id_)->GetLoRABuffers(signature);
+}
+
 }  // namespace litert::lm

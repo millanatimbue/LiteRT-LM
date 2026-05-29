@@ -37,6 +37,17 @@ namespace litert::lm {
 // essentially a shared_ptr to the real data, so the LoRA class is not the sore
 // owner of the underlying resources. But we should still treat LoRA as the main
 // owner of the lora data, and destroy it to free resources when necessary.
+//
+// Per-signature storage: LiteRT's `CreateInputBuffer(signature, name)` returns
+// a buffer whose backend type / memory layout is specialized for that specific
+// signature's compiled graph. The prefill and decode signatures are compiled
+// to different runners with potentially different buffer-type expectations,
+// so a buffer created for the decode signature cannot in general be reused as
+// an input to the prefill signature (LiteRT rejects with "The given buffer
+// type is not supported"). LoRA::Init therefore creates one buffer set per
+// signature: the "decode" signature plus every signature whose name begins
+// with "prefill" (e.g. "prefill", "prefill_128", "prefill_512"). Callers
+// retrieve the matching set via GetLoRABuffers(signature).
 class LoRA {
  public:
   // Creates and initializes a LoRA object.
@@ -52,31 +63,51 @@ class LoRA {
 
   virtual ~LoRA() = default;
 
-  // Returns a duplicated TensorBuffer for the given LoRA tensor name.
-  // TensorBuffer is a shared_ptr to the real data, so users are responsible
-  // for destroying the TensorBuffer received after use to properly decrease
-  // reference count to the underlying data.
+  // Returns a duplicated TensorBuffer for the given LoRA tensor name from the
+  // decode signature's buffer set. TensorBuffer is a shared_ptr to the real
+  // data, so users are responsible for destroying the TensorBuffer received
+  // after use to properly decrease reference count to the underlying data.
   absl::StatusOr<litert::TensorBuffer> GetLoRABuffer(
       const std::string& name) const;
 
   // Returns a map of all the LoRA tensor names to their duplicated
-  // TensorBuffers.
+  // TensorBuffers, for the decode signature. Equivalent to
+  // GetLoRABuffers("decode"). Kept for callers that don't care which signature
+  // they're binding to (e.g. tests).
   // See GetLoRABuffer() for more details about resource ownership.
   absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
   GetLoRABuffers() const;
+
+  // Returns a map of all the LoRA tensor names to their duplicated
+  // TensorBuffers for the given `signature`. The signature must be one of the
+  // signatures populated at Init time: "decode" or a name beginning with
+  // "prefill". Returns NotFoundError otherwise.
+  absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
+  GetLoRABuffers(absl::string_view signature) const;
 
  private:
   LoRA(std::unique_ptr<LoraData> lora_data,
        const litert::CompiledModel& compiled_model)
       : lora_data_(std::move(lora_data)), compiled_model_(compiled_model) {}
 
-  // Initializes the LoRA object by creating TensorBuffers for all LoRA inputs
-  // and copying the data from LoraData.
+  // Initializes the LoRA object by enumerating compiled-model signatures
+  // (decode + any prefill_*) and creating TensorBuffers for each signature's
+  // LoRA inputs, populated from the LoraData payload.
   absl::Status Init();
+
+  // Populate per_signature_lora_buffers_[signature] with one buffer per LoRA
+  // input declared by `signature`. Copies the same lora_data_ bytes into each
+  // signature's buffer (or zeros if the tensor isn't in LoraData).
+  absl::Status InitForSignature(absl::string_view signature);
 
   std::unique_ptr<LoraData> lora_data_;
   const litert::CompiledModel& compiled_model_;
-  absl::flat_hash_map<std::string, litert::TensorBuffer> lora_buffers_;
+  // Outer key: signature name ("decode", "prefill", "prefill_128", ...).
+  // Inner key: LoRA tensor name. Stored owning the std::string keys so callers
+  // can use absl::string_view safely against the lifetime of this object.
+  absl::flat_hash_map<std::string,
+                      absl::flat_hash_map<std::string, litert::TensorBuffer>>
+      per_signature_lora_buffers_;
 };
 
 }  // namespace litert::lm

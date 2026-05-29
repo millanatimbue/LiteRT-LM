@@ -745,10 +745,15 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
   // base-model K/V into the cache; decode-step-1 then runs LoRA-modified Q/O
   // against a base K/V history, which is not what the classifier head was
   // trained against. The compiled model graph must declare the LoRA inputs in
-  // the prefill signature for this to take effect.
+  // the prefill signature for this to take effect. We pass `prefill_signature`
+  // so LoraManager hands back buffers created via CreateInputBuffer on this
+  // signature — buffers created against the decode signature have a different
+  // backend type / memory layout and LiteRT will reject them with
+  // "The given buffer type is not supported".
   if (lora_manager_ != nullptr &&
       lora_manager_->GetCurrentLoRAId().has_value()) {
-    ASSIGN_OR_RETURN(auto lora_buffers, lora_manager_->GetLoRABuffers());
+    ASSIGN_OR_RETURN(auto lora_buffers,
+                     lora_manager_->GetLoRABuffers(prefill_signature));
     for (auto& [input_name, input_buffer] : lora_buffers) {
       input_buffers[input_name] = std::move(input_buffer);
     }
@@ -957,10 +962,14 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
   }
   // Merge active LoRA tensors. Executor skips LoRA-named inputs at buffer
   // construction (see IsLoRAInputName branch in CreateDecodeBuffers), so the
-  // graph would be missing those inputs without this hook.
+  // graph would be missing those inputs without this hook. Pass the active
+  // decode signature name (typically "decode") so LoraManager returns buffers
+  // created via CreateInputBuffer on that signature — required for LiteRT's
+  // per-signature buffer-type compatibility.
   if (lora_manager_ != nullptr &&
       lora_manager_->GetCurrentLoRAId().has_value()) {
-    ASSIGN_OR_RETURN(auto lora_buffers, lora_manager_->GetLoRABuffers());
+    ASSIGN_OR_RETURN(auto lora_buffers,
+                     lora_manager_->GetLoRABuffers(signature_name));
     for (auto& [input_name, input_buffer] : lora_buffers) {
       decode_input_buffers[input_name] = std::move(input_buffer);
     }
