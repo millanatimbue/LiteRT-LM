@@ -94,6 +94,23 @@ jobs:
             bazel-mac-classify-${{ hashFiles('WORKSPACE', '.bazelrc', '**/BUILD*', '**/*.bzl') }}-
             bazel-mac-classify-
 
+      # This fork strips `prebuilt/macos_arm64/*.dylib` LFS pointers (commit
+      # 58977ba) to unblock SPM checkout. Bazel still references them via
+      # `runtime/components/constrained_decoding/BUILD` →
+      # `//prebuilt/macos_arm64:...`, so we pull them from upstream LFS at
+      # build time. Mirrors the iOS workflow's `prebuilt/ios_arm64/*` fetch.
+      - name: Fetch macOS prebuilt dylibs from upstream
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          git clone --depth 1 https://github.com/google-ai-edge/LiteRT-LM upstream-prebuilts
+          cd upstream-prebuilts
+          git lfs install
+          git lfs pull --include "prebuilt/macos_arm64/*"
+          mkdir -p "$GITHUB_WORKSPACE/prebuilt"
+          cp -R prebuilt/macos_arm64 "$GITHUB_WORKSPACE/prebuilt/"
+          echo "=== macOS dylibs ===" && ls -lh "$GITHUB_WORKSPACE/prebuilt/macos_arm64/" || true
+
       - name: Smoke test - bazel query target
         run: bazelisk query //runtime/engine:litert_lm_classify_main
 
