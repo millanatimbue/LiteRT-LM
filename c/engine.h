@@ -143,6 +143,18 @@ LITERT_LM_C_API_EXPORT
 void litert_lm_session_config_set_sampler_params(
     LiteRtLmSessionConfig* config, const LiteRtLmSamplerParams* sampler_params);
 
+// Sets a scoped LoRA adapter `.tflite` file for this session. The runtime
+// merges the file's named LoRA tensors into both prefill and decode signatures
+// (LoRA tensor inputs must be declared in the compiled model — see the
+// LiteRT-LM LoRA regex in `runtime/util/lora_util.cc`). Pass NULL or an empty
+// string to clear a previously-set LoRA. Returns `true` on success, `false` if
+// the file can't be opened.
+// @param config The config to modify.
+// @param path Filesystem path to the LoRA adapter `.tflite`.
+LITERT_LM_C_API_EXPORT
+bool litert_lm_session_config_set_scoped_lora_file(
+    LiteRtLmSessionConfig* config, const char* path);
+
 // Destroys a LiteRT LM Session Config.
 // @param config The config to destroy.
 LITERT_LM_C_API_EXPORT

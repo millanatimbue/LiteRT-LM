@@ -172,6 +172,20 @@ public actor Engine {
       litert_lm_session_config_set_sampler_params(cSessionConfig, &params)
     }
 
+    if let maxOutputTokens = conversationConfig.maxOutputTokens {
+      litert_lm_session_config_set_max_output_tokens(
+        cSessionConfig, Int32(maxOutputTokens))
+    }
+
+    if let loraURL = conversationConfig.scopedLoraFile {
+      let opened = loraURL.path.withCString { cPath in
+        litert_lm_session_config_set_scoped_lora_file(cSessionConfig, cPath)
+      }
+      if !opened {
+        throw LiteRTLMError.config(.invalidLoraFile(path: loraURL.path))
+      }
+    }
+
     guard let cConversationConfig = litert_lm_conversation_config_create() else {
       throw LiteRTLMError.engine(.failedToCreateConversationConfig)
     }

@@ -156,6 +156,22 @@ public struct ConversationConfig {
   /// state for the resource manager to duplicate.
   public let prefillPrefaceOnInit: Bool
 
+  /// Optional path to a LoRA adapter `.tflite`. When set, the runtime opens it
+  /// and merges its named LoRA tensors into both the prefill and decode
+  /// signatures of the compiled model. The compiled model must declare
+  /// matching LoRA tensor inputs (see the runtime's LoRA regex in
+  /// `runtime/util/lora_util.cc`). Used together with a `.litertlm` that
+  /// embeds a classifier head + LoRA-input slots to expose
+  /// `getAuxiliaryOutput("classifier_logits")`.
+  public let scopedLoraFile: URL?
+
+  /// Optional cap on the number of decode steps per send-message call. Set to
+  /// `1` for one-shot classification flows where you want `classifier_logits`
+  /// computed on the last input token (which the runtime processes as the
+  /// "pending" token in decode-step-1 after prefill), without generating
+  /// additional response tokens. `nil` leaves the engine default in place.
+  public let maxOutputTokens: Int?
+
   /// - Parameters:
   ///   - systemMessage: The system message to be used in the conversation.
   ///   - initialMessages: The initial messages to populate the conversation history.
@@ -164,12 +180,17 @@ public struct ConversationConfig {
   ///     default values.
   ///   - prefillPrefaceOnInit: Whether to prefill the preface on init. Set to
   ///     `true` for the base conversation in a prefix-caching setup.
+  ///   - scopedLoraFile: Path to a LoRA adapter `.tflite` to hot-swap for
+  ///     this conversation's underlying session.
+  ///   - maxOutputTokens: Cap on decode steps. Set to `1` for classification.
   public init(
     systemMessage: Message? = nil,
     initialMessages: [Message] = [],
     tools: [Tool] = [],
     samplerConfig: SamplerConfig? = nil,
-    prefillPrefaceOnInit: Bool = false
+    prefillPrefaceOnInit: Bool = false,
+    scopedLoraFile: URL? = nil,
+    maxOutputTokens: Int? = nil
   ) {
     self.systemMessage = systemMessage.map { msg in
       msg.role == .system
@@ -179,5 +200,7 @@ public struct ConversationConfig {
     self.tools = tools
     self.samplerConfig = samplerConfig
     self.prefillPrefaceOnInit = prefillPrefaceOnInit
+    self.scopedLoraFile = scopedLoraFile
+    self.maxOutputTokens = maxOutputTokens
   }
 }
