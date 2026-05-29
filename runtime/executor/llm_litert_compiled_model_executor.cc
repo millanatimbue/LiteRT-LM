@@ -738,20 +738,17 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
     input_buffers[input_name] = std::move(input_buffer_dup);
   }
-  // Merge LoRA tensors into prefill inputs if a LoRA is active. Mirrors the
-  // equivalent block in BindTensorsAndRunDecode so prefill computes K/V with
-  // LoRA-modified projections, populating the cache with the same values
-  // training-time forward passes did. Without this hook, prefill writes
-  // base-model K/V into the cache; decode-step-1 then runs LoRA-modified Q/O
-  // against a base K/V history, which is not what the classifier head was
-  // trained against. The compiled model graph must declare the LoRA inputs in
-  // the prefill signature for this to take effect. We pass `prefill_signature`
-  // so LoraManager hands back buffers created via CreateInputBuffer on this
-  // signature — buffers created against the decode signature have a different
-  // backend type / memory layout and LiteRT will reject them with
-  // "The given buffer type is not supported".
-  if (lora_manager_ != nullptr &&
-      lora_manager_->GetCurrentLoRAId().has_value()) {
+  // Merge LoRA tensors into prefill inputs if a LoRA is active on THIS
+  // context. We read the lora_id from the current context's processed_context,
+  // not from LoraManager's `current_lora_id_` — that's engine-scoped and
+  // leaks across sessions, e.g. a chat sendMessage that follows a classifier
+  // session would see the classifier LoRA bound here and emit garbage.
+  // The compiled model graph must declare the LoRA inputs in this signature
+  // for binding to take effect; we pass `prefill_signature` to LoraManager so
+  // it returns buffers shaped for this specific signature's runner.
+  const std::optional<uint32_t> prefill_lora_id =
+      llm_context_->processed_context().lora_id();
+  if (lora_manager_ != nullptr && prefill_lora_id.has_value()) {
     ASSIGN_OR_RETURN(auto lora_buffers,
                      lora_manager_->GetLoRABuffers(prefill_signature));
     for (auto& [input_name, input_buffer] : lora_buffers) {
@@ -962,12 +959,15 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
   }
   // Merge active LoRA tensors. Executor skips LoRA-named inputs at buffer
   // construction (see IsLoRAInputName branch in CreateDecodeBuffers), so the
-  // graph would be missing those inputs without this hook. Pass the active
-  // decode signature name (typically "decode") so LoraManager returns buffers
-  // created via CreateInputBuffer on that signature — required for LiteRT's
-  // per-signature buffer-type compatibility.
-  if (lora_manager_ != nullptr &&
-      lora_manager_->GetCurrentLoRAId().has_value()) {
+  // graph would be missing those inputs without this hook. Read the lora_id
+  // from THIS context (set at CreateNewContext time from session_config), not
+  // from LoraManager's engine-scoped `current_lora_id_` — that bleeds across
+  // sessions. Pass the active decode signature name (typically "decode") so
+  // LoraManager returns buffers created via CreateInputBuffer on that
+  // signature — required for LiteRT's per-signature buffer-type compatibility.
+  const std::optional<uint32_t> decode_lora_id =
+      llm_context_->processed_context().lora_id();
+  if (lora_manager_ != nullptr && decode_lora_id.has_value()) {
     ASSIGN_OR_RETURN(auto lora_buffers,
                      lora_manager_->GetLoRABuffers(signature_name));
     for (auto& [input_name, input_buffer] : lora_buffers) {
