@@ -480,6 +480,10 @@ absl::StatusOr<Responses> Decode(
 
   ASSIGN_OR_RETURN(int executor_step_before_decode, executor.GetCurrentStep());
   const int max_num_tokens = TryGetMaxNumTokens(executor);
+  ABSL_LOG(INFO) << "[STEP-DBG] Decode entry: current_step="
+                 << executor_step_before_decode
+                 << " max_num_tokens=" << max_num_tokens
+                 << " max_output_tokens=" << max_output_tokens;
   DecodeOneStep run_one_step(&executor, &tokenizer, num_output_candidates,
                              stop_token_detector, benchmark_info, sampler,
                              constraint);

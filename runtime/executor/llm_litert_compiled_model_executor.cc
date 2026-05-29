@@ -1207,6 +1207,10 @@ absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
 
 absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
     const ExecutorInputs& inputs, const ExecutorDecodeParams& decode_params) {
+  ABSL_LOG(INFO) << "[DBG] DecodeLogits enter: current_step="
+                 << llm_context_->runtime_state().current_step
+                 << " ran_decode="
+                 << llm_context_->runtime_state().ran_decode;
   LITERT_ASSIGN_OR_RETURN(
       auto output_logits,
       decode_output_buffers_[signatures_.output_logits].Duplicate());
@@ -1214,6 +1218,8 @@ absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
   bool last_run_is_decode = llm_context_->runtime_state().ran_decode;
   RETURN_IF_ERROR(PrepareFirstDecode());
   ASSIGN_OR_RETURN(auto step_and_token, GetTokenToDecode(inputs));
+  ABSL_LOG(INFO) << "[DBG] DecodeLogits about to DecodeInternal: token_count="
+                 << step_and_token.token.size();
   RETURN_IF_ERROR(DecodeInternal(step_and_token.token, output_logits));
   RETURN_IF_ERROR(ConsumePendingOrAddProcessedToken(step_and_token.token));
 
