@@ -567,6 +567,26 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
     }
     RETURN_IF_ERROR(lora_mgr->LoadLoRA(*lora_id, model_assets));
     RETURN_IF_ERROR(lora_mgr->UseLoRA(*lora_id));
+  } else if (!lora_id.has_value()) {
+    // No scoped LoRA on this session — explicitly clear any LoRA the executor
+    // had bound from a previous session. LoraManager's `current_lora_id_` is
+    // engine-scoped (not session-scoped), so without this clear a chat-style
+    // session that follows a LoRA-using session inherits the previous LoRA
+    // and the model produces garbage (e.g. repeating `.\n` for Gemma 4 IT
+    // running under the classifier's LoRA).
+    if (LoraManager* lora_mgr = llm_executor_->lora_manager()) {
+      lora_mgr->ClearCurrentLoRA();
+    }
+  }
+  // Log whether this session is running with LoRA. Useful when verifying
+  // that classifier sessions actually apply LoRA and chat sessions don't.
+  if (LoraManager* lora_mgr = llm_executor_->lora_manager()) {
+    ABSL_LOG(INFO) << "[LoRA-DBG] CreateContextHandler: session has_scoped_lora="
+                   << (session_config.GetScopedLoraFile() != nullptr)
+                   << " executor_current_lora_id="
+                   << (lora_mgr->GetCurrentLoRAId().has_value()
+                           ? absl::StrCat(*lora_mgr->GetCurrentLoRAId())
+                           : std::string("none"));
   }
 
   llm_executor_->SetDecodeSignatureName(session_config.GetDecodeSignatureName());
