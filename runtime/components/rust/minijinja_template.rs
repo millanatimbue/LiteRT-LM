@@ -262,6 +262,36 @@ impl MinijinjaTemplate {
         env.add_function("raise_exception", raise_exception);
         env.add_filter("tojson", tojson);
         env.add_test("none", is_none);
+        // HuggingFace chat templates routinely call `obj.get('key')` /
+        // `obj.get('key', default)` for safe optional-field lookups. Python
+        // Jinja2 supports this because dict.get exists; minijinja-rs ships no
+        // `get` method on maps. Intercept the unknown method here and
+        // emulate Python semantics.
+        env.set_unknown_method_callback(|_state, value, method, args| {
+            use minijinja::value::ValueKind;
+            if method != "get" {
+                return Err(minijinja::Error::from(minijinja::ErrorKind::UnknownMethod));
+            }
+            if args.is_empty() || args.len() > 2 {
+                return Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    "get() takes 1 or 2 arguments",
+                ));
+            }
+            let default_val =
+                args.get(1).cloned().unwrap_or(minijinja::Value::UNDEFINED);
+            // Only meaningful on map-like values. Anything else returns the
+            // default, matching Python's behaviour when `.get` is called on
+            // None-ish or undefined values (raises in Python, but we mirror
+            // the template author's clear intent of optional lookup).
+            if value.kind() != ValueKind::Map {
+                return Ok(default_val);
+            }
+            match value.get_item(&args[0]) {
+                Ok(v) if !v.is_undefined() && !v.is_none() => Ok(v),
+                _ => Ok(default_val),
+            }
+        });
         env.add_template("template", &self.source)?;
         let tmpl = env.get_template("template")?;
 

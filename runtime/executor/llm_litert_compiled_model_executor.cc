@@ -738,6 +738,21 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
     input_buffers[input_name] = std::move(input_buffer_dup);
   }
+  // Merge LoRA tensors into prefill inputs if a LoRA is active. Mirrors the
+  // equivalent block in BindTensorsAndRunDecode so prefill computes K/V with
+  // LoRA-modified projections, populating the cache with the same values
+  // training-time forward passes did. Without this hook, prefill writes
+  // base-model K/V into the cache; decode-step-1 then runs LoRA-modified Q/O
+  // against a base K/V history, which is not what the classifier head was
+  // trained against. The compiled model graph must declare the LoRA inputs in
+  // the prefill signature for this to take effect.
+  if (lora_manager_ != nullptr &&
+      lora_manager_->GetCurrentLoRAId().has_value()) {
+    ASSIGN_OR_RETURN(auto lora_buffers, lora_manager_->GetLoRABuffers());
+    for (auto& [input_name, input_buffer] : lora_buffers) {
+      input_buffers[input_name] = std::move(input_buffer);
+    }
+  }
   absl::flat_hash_map<absl::string_view, TensorBuffer> output_buffers;
   for (const auto& [output_name, output_buffer] : *output_kv_cache_buffers_) {
     LITERT_ASSIGN_OR_RETURN(auto output_buffer_dup, output_buffer.Duplicate());
