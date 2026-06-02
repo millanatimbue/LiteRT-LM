@@ -777,12 +777,47 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
     output_buffers[output_name] = std::move(output_buffer_dup);
   }
 
+  // [PREFILL-DBG] Mirror of the decode-side instrumentation. Same atomic
+  // counter scope so decode-call#K and prefill-call#K can be correlated in
+  // the log: failures often hit decode but the polluting state may have
+  // been set during prefill.
+  static std::atomic<uint64_t> prefill_call_seq{0};
+  const uint64_t this_call = prefill_call_seq.fetch_add(1) + 1;
+  const int step_before = llm_context_->runtime_state().current_step;
+  auto log_failure = [&](absl::string_view err_msg) {
+    ABSL_LOG(ERROR) << "[PREFILL-DBG] Run FAILED call#=" << this_call
+                    << " sig=\"" << prefill_signature << "\" step="
+                    << step_before << " lora_id="
+                    << (prefill_lora_id.has_value()
+                            ? absl::StrCat(*prefill_lora_id)
+                            : std::string("none"))
+                    << " input_count=" << input_buffers.size()
+                    << " output_count=" << output_buffers.size()
+                    << " async=" << async << " err=" << err_msg;
+    for (const auto& [input_name, input_buffer] : input_buffers) {
+      auto buf_type = input_buffer.BufferType();
+      const int btype = buf_type.HasValue()
+                            ? static_cast<int>(buf_type.Value())
+                            : -1;
+      ABSL_LOG(ERROR) << "[PREFILL-DBG]   input=\"" << input_name
+                      << "\" buffer_type=" << btype
+                      << " is_lora=" << IsLoRAInputName(input_name);
+    }
+  };
   if (async) {
-    LITERT_RETURN_IF_ERROR(compiled_model_->RunAsync(
-        prefill_signature, input_buffers, output_buffers, async));
+    auto async_res = compiled_model_->RunAsync(prefill_signature, input_buffers,
+                                               output_buffers, async);
+    if (!async_res) {
+      log_failure(async_res.Error().Message());
+    }
+    LITERT_RETURN_IF_ERROR(std::move(async_res));
   } else {
-    LITERT_RETURN_IF_ERROR(
-        compiled_model_->Run(prefill_signature, input_buffers, output_buffers));
+    auto sync_res = compiled_model_->Run(prefill_signature, input_buffers,
+                                         output_buffers);
+    if (!sync_res) {
+      log_failure(sync_res.Error().Message());
+    }
+    LITERT_RETURN_IF_ERROR(std::move(sync_res));
   }
 
   if (!gpu_optimized_single_buffer_cache_) {
@@ -1013,9 +1048,41 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
   }
 
   bool async = true;
-  LITERT_RETURN_IF_ERROR(
-      compiled_model_->RunAsync(signature_name, decode_input_buffers,
-                                decode_output_buffers, async));
+  // [DECODE-DBG] Capture state immediately around RunAsync. Logging is
+  // pre+post so on a failure we can correlate the failing call's signature,
+  // step, lora_id, and buffer types. We use a static atomic counter so each
+  // RunAsync gets a monotonic id across the whole process — helps see if
+  // failures correlate to call sequence (e.g. always the Nth call after a
+  // Conversation::Clone).
+  static std::atomic<uint64_t> decode_call_seq{0};
+  const uint64_t this_call = decode_call_seq.fetch_add(1) + 1;
+  const int step_before = llm_context_->runtime_state().current_step;
+  auto run_status = compiled_model_->RunAsync(
+      signature_name, decode_input_buffers, decode_output_buffers, async);
+  if (!run_status) {
+    ABSL_LOG(ERROR) << "[DECODE-DBG] RunAsync FAILED call#=" << this_call
+                    << " sig=\"" << signature_name << "\" step=" << step_before
+                    << " lora_id="
+                    << (decode_lora_id.has_value()
+                            ? absl::StrCat(*decode_lora_id)
+                            : std::string("none"))
+                    << " input_count=" << decode_input_buffers.size()
+                    << " output_count=" << decode_output_buffers.size()
+                    << " err=" << run_status.Error().Message();
+    // Per-input buffer type. The kTfLiteCustom!=kTfLitePersistentRo (6 != 8)
+    // crash is a buffer-type mismatch on a specific tensor — this dump
+    // identifies WHICH tensor.
+    for (const auto& [input_name, input_buffer] : decode_input_buffers) {
+      auto buf_type = input_buffer.BufferType();
+      const int btype = buf_type.HasValue()
+                            ? static_cast<int>(buf_type.Value())
+                            : -1;
+      ABSL_LOG(ERROR) << "[DECODE-DBG]   input=\"" << input_name
+                      << "\" buffer_type=" << btype
+                      << " is_lora=" << IsLoRAInputName(input_name);
+    }
+  }
+  LITERT_RETURN_IF_ERROR(std::move(run_status));
 
   if (!gpu_optimized_single_buffer_cache_) {
     std::swap(input_kv_cache_buffers_, output_kv_cache_buffers_);
