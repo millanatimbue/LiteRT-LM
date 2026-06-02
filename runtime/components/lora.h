@@ -59,7 +59,23 @@ class LoRA {
   // @return A unique_ptr to the LoRA instance, or an error status.
   static absl::StatusOr<std::unique_ptr<LoRA>> Create(
       std::unique_ptr<LoraData> lora_data,
-      const litert::CompiledModel& compiled_model);
+      const litert::CompiledModel& compiled_model,
+      absl::string_view decode_signature_name = "decode");
+
+  // Creates a LoRA object with no LoRA data — every LoRA-named tensor input
+  // is allocated and zero-filled. Used by LoraManager as the "null LoRA" so
+  // sessions without a scoped LoRA file (e.g. base-model chat on a compiled
+  // graph that declares LoRA inputs) still bind LoRA tensors via the same
+  // delegate-aware allocation path real LoRAs use. Without this fallback,
+  // the runtime feeds uninitialized memory into attention and the model
+  // emits pure padding on the GPU path.
+  //
+  // `decode_signature_name` is the engine's chosen decode signature — for
+  // dual-signature models this is e.g. "decode_classifier" rather than
+  // upstream's plain "decode". Init populates buffers for this exact name.
+  static absl::StatusOr<std::unique_ptr<LoRA>> CreateEmpty(
+      const litert::CompiledModel& compiled_model,
+      absl::string_view decode_signature_name = "decode");
 
   virtual ~LoRA() = default;
 
@@ -87,8 +103,11 @@ class LoRA {
 
  private:
   LoRA(std::unique_ptr<LoraData> lora_data,
-       const litert::CompiledModel& compiled_model)
-      : lora_data_(std::move(lora_data)), compiled_model_(compiled_model) {}
+       const litert::CompiledModel& compiled_model,
+       absl::string_view decode_signature_name)
+      : lora_data_(std::move(lora_data)),
+        compiled_model_(compiled_model),
+        decode_signature_name_(decode_signature_name) {}
 
   // Initializes the LoRA object by populating the decode signature's LoRA
   // tensor buffers (the canonical signature LoRA inputs were always allocated
@@ -114,6 +133,10 @@ class LoRA {
 
   std::unique_ptr<LoraData> lora_data_;
   const litert::CompiledModel& compiled_model_;
+  // The decode signature this LoRA's eager-init populated buffers for. For
+  // upstream single-signature models this is "decode"; for dual-signature
+  // bouncer it's "decode_classifier" (the variant that has LoRA inputs).
+  std::string decode_signature_name_;
   // Outer key: signature name ("decode", "prefill", "prefill_128", ...).
   // Inner key: LoRA tensor name. Stored owning the std::string keys so callers
   // can use absl::string_view safely against the lifetime of this object.

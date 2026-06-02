@@ -34,12 +34,16 @@
 namespace litert::lm {
 
 absl::StatusOr<std::unique_ptr<LoraManager>> LoraManager::Create(
-    const litert::CompiledModel& compiled_model) {
-  return absl::WrapUnique(new LoraManager(compiled_model));
+    const litert::CompiledModel& compiled_model,
+    absl::string_view decode_signature_name) {
+  return absl::WrapUnique(
+      new LoraManager(compiled_model, decode_signature_name));
 }
 
-LoraManager::LoraManager(const litert::CompiledModel& compiled_model)
-    : compiled_model_(compiled_model) {}
+LoraManager::LoraManager(const litert::CompiledModel& compiled_model,
+                         absl::string_view decode_signature_name)
+    : compiled_model_(compiled_model),
+      decode_signature_name_(decode_signature_name) {}
 
 absl::Status LoraManager::LoadLoRA(uint32_t lora_id,
                                    const ModelAssets& model_assets) {
@@ -57,8 +61,9 @@ absl::Status LoraManager::UseLoRA(uint32_t lora_id) {
     return absl::NotFoundError("LoRA ID not found");
   }
   if (!loras_.contains(lora_id)) {
-    ASSIGN_OR_RETURN(auto lora, LoRA::Create(std::move(lora_data_[lora_id]),
-                                             compiled_model_));
+    ASSIGN_OR_RETURN(auto lora,
+                     LoRA::Create(std::move(lora_data_[lora_id]),
+                                  compiled_model_, decode_signature_name_));
     loras_[lora_id] = std::move(lora);
     lora_data_.erase(lora_id);
   }
@@ -86,6 +91,26 @@ LoraManager::GetLoRABuffers(absl::string_view signature) const {
     return absl::NotFoundError("LoRA ID not found");
   }
   return loras_.at(*current_lora_id_)->GetLoRABuffers(signature);
+}
+
+absl::Status LoraManager::EnsureNullLora() {
+  if (null_lora_ != nullptr) return absl::OkStatus();
+  ASSIGN_OR_RETURN(null_lora_,
+                   LoRA::CreateEmpty(compiled_model_, decode_signature_name_));
+  return absl::OkStatus();
+}
+
+absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
+LoraManager::GetLoRABuffersOrZero(absl::string_view signature,
+                                  std::optional<uint32_t> context_lora_id) {
+  if (context_lora_id.has_value() && loras_.contains(*context_lora_id)) {
+    return loras_.at(*context_lora_id)->GetLoRABuffers(signature);
+  }
+  // Per-context says "no LoRA" (or names a LoRA we don't have loaded yet).
+  // Use the null LoRA so the bound buffers are zero-filled but allocated
+  // through the same delegate-aware path real LoRAs use.
+  RETURN_IF_ERROR(EnsureNullLora());
+  return null_lora_->GetLoRABuffers(signature);
 }
 
 }  // namespace litert::lm

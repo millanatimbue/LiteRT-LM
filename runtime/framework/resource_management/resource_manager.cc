@@ -578,18 +578,16 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
       lora_mgr->ClearCurrentLoRA();
     }
   }
-  // Log whether this session is running with LoRA. Useful when verifying
-  // that classifier sessions actually apply LoRA and chat sessions don't.
-  if (LoraManager* lora_mgr = llm_executor_->lora_manager()) {
-    ABSL_LOG(INFO) << "[LoRA-DBG] CreateContextHandler: session has_scoped_lora="
-                   << (session_config.GetScopedLoraFile() != nullptr)
-                   << " executor_current_lora_id="
-                   << (lora_mgr->GetCurrentLoRAId().has_value()
-                           ? absl::StrCat(*lora_mgr->GetCurrentLoRAId())
-                           : std::string("none"));
+  // Only override the engine's decode signature when the session explicitly
+  // set one. An empty string means "use the engine's configured signature"
+  // (set at engine construction via ExecutorSettings.SetDecodeSignatureName);
+  // unconditionally calling SetDecodeSignatureName("") here would clobber
+  // the engine's per-variant routing back to the legacy "decode" default
+  // and break multi-signature .litertlm files.
+  if (!session_config.GetDecodeSignatureName().empty()) {
+    llm_executor_->SetDecodeSignatureName(
+        session_config.GetDecodeSignatureName());
   }
-
-  llm_executor_->SetDecodeSignatureName(session_config.GetDecodeSignatureName());
 
   auto runtime_config = RuntimeConfig{
     .output_heads = session_config.GetNumOutputCandidates(),
@@ -624,9 +622,6 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
 absl::StatusOr<std::unique_ptr<ContextHandler>>
 ResourceManager::CloneContextHandler(
     std::shared_ptr<const ContextHandler> llm_context_handler) {
-  ABSL_LOG(INFO) << "[CLONE-DBG] ResourceManager::CloneContextHandler: enter "
-                    "handler="
-                 << llm_context_handler.get();
   RET_CHECK_NE(llm_context_handler, nullptr)
       << "The provided context handler should not be null.";
 
@@ -635,42 +630,24 @@ ResourceManager::CloneContextHandler(
 
   const bool has_config = llm_context_handler->HasRuntimeConfig();
   const bool has_state = llm_context_handler->HasRuntimeState();
-  ABSL_LOG(INFO) << "[CLONE-DBG] CloneContextHandler: has_runtime_config="
-                 << has_config << " has_runtime_state=" << has_state;
 
   // If the context handler has the runtime config and runtime state, use
   // them directly.
   if (has_config && has_state) {
     ASSIGN_OR_RETURN(runtime_config, llm_context_handler->GetRuntimeConfig());
     ASSIGN_OR_RETURN(runtime_state, llm_context_handler->GetRuntimeState());
-    ABSL_LOG(INFO)
-        << "[CLONE-DBG] CloneContextHandler: cached config/state path ok";
   } else {
     // Otherwise, assume the context handler is loaded by the manager to the
     // executor, and get the runtime config and runtime state from the
     // executor.
     MovableMutexLock lock(&executor_mutex_);
-    ABSL_LOG(INFO) << "[CLONE-DBG] CloneContextHandler: live-executor path. "
-                      "current_handler_="
-                   << current_handler_.get()
-                   << " provided=" << llm_context_handler.get();
-    if (current_handler_ != llm_context_handler) {
-      ABSL_LOG(ERROR)
-          << "[CLONE-DBG] CloneContextHandler: handler mismatch. The base "
-             "conversation was never prefilled (or another conversation "
-             "displaced it), so the executor's current handler does not "
-             "match. Likely fix: set ConversationConfig::Builder::"
-             "SetPrefillPrefaceOnInit(true).";
-    }
     RET_CHECK_EQ(current_handler_, llm_context_handler)
         << "The provided context handler does not have the runtime config "
-           "and "
-           "runtime state, assuming it is loaded by the manager, but the "
-           "manager does not have the same handler.";
+           "and runtime state, assuming it is loaded by the manager, but the "
+           "manager does not have the same handler. Likely fix: set "
+           "ConversationConfig::Builder::SetPrefillPrefaceOnInit(true).";
     ASSIGN_OR_RETURN(runtime_config, llm_executor_->GetRuntimeConfig());
     ASSIGN_OR_RETURN(runtime_state, llm_executor_->GetRuntimeState());
-    ABSL_LOG(INFO)
-        << "[CLONE-DBG] CloneContextHandler: live-executor path ok";
   }
   auto processed_context = llm_context_handler->shared_processed_context();
 

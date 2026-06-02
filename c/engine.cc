@@ -218,6 +218,7 @@ struct LiteRtLmConversationConfig {
   std::string extra_context_json;
   bool enable_constrained_decoding = false;
   bool filter_channel_content_from_kv_cache = false;
+  bool skip_chat_template = false;
   bool prefill_preface_on_init = false;
 };
 
@@ -385,6 +386,13 @@ void litert_lm_conversation_config_set_prefill_preface_on_init(
   }
 }
 
+void litert_lm_conversation_config_set_skip_chat_template(
+    LiteRtLmConversationConfig* config, bool skip_chat_template) {
+  if (config) {
+    config->skip_chat_template = skip_chat_template;
+  }
+}
+
 void litert_lm_conversation_config_delete(LiteRtLmConversationConfig* config) {
   delete config;
 }
@@ -539,6 +547,24 @@ void litert_lm_engine_settings_set_enable_speculative_decoding(
     advanced_settings.enable_speculative_decoding = enable_speculative_decoding;
     main_settings.SetAdvancedSettings(advanced_settings);
   }
+}
+
+void litert_lm_engine_settings_set_decode_signature_name(
+    LiteRtLmEngineSettings* settings, const char* decode_signature_name) {
+  if (!settings || !settings->settings || decode_signature_name == nullptr) {
+    return;
+  }
+  settings->settings->GetMutableMainExecutorSettings()
+      .SetDecodeSignatureName(decode_signature_name);
+}
+
+void litert_lm_engine_settings_set_prefill_signature_filter(
+    LiteRtLmEngineSettings* settings, const char* prefill_signature_filter) {
+  if (!settings || !settings->settings || prefill_signature_filter == nullptr) {
+    return;
+  }
+  settings->settings->GetMutableMainExecutorSettings()
+      .SetPrefillSignatureFilter(prefill_signature_filter);
 }
 
 void litert_lm_engine_settings_set_activation_data_type(
@@ -977,6 +1003,7 @@ LiteRtLmConversation* litert_lm_conversation_create(
     builder.SetFilterChannelContentFromKvCache(
         c_config->filter_channel_content_from_kv_cache);
     builder.SetPrefillPrefaceOnInit(c_config->prefill_preface_on_init);
+    builder.SetSkipChatTemplate(c_config->skip_chat_template);
     auto config = builder.Build(*engine->engine);
 
     if (!config.ok()) {
@@ -1013,26 +1040,14 @@ void litert_lm_conversation_delete(LiteRtLmConversation* conversation) {
 
 LiteRtLmConversation* litert_lm_conversation_clone(
     LiteRtLmConversation* conversation) {
-  ABSL_LOG(INFO) << "[CLONE-DBG] litert_lm_conversation_clone: enter c_handle="
-                 << static_cast<void*>(conversation);
-  if (!conversation) {
-    ABSL_LOG(ERROR) << "[CLONE-DBG] litert_lm_conversation_clone: NULL c_handle";
-    return nullptr;
-  }
-  if (!conversation->conversation) {
-    ABSL_LOG(ERROR)
-        << "[CLONE-DBG] litert_lm_conversation_clone: NULL inner conversation";
-    return nullptr;
-  }
+  if (!conversation || !conversation->conversation) return nullptr;
   auto cloned = conversation->conversation->Clone();
   if (!cloned.ok()) {
-    ABSL_LOG(ERROR) << "[CLONE-DBG] Failed to clone conversation: "
-                    << cloned.status();
+    ABSL_LOG(ERROR) << "Failed to clone conversation: " << cloned.status();
     return nullptr;
   }
   auto c_conversation = std::make_unique<LiteRtLmConversation>();
   c_conversation->conversation = std::move(*cloned);
-  ABSL_LOG(INFO) << "[CLONE-DBG] litert_lm_conversation_clone: success";
   return c_conversation.release();
 }
 

@@ -43,7 +43,8 @@ class LoraManager {
   // information. It is used for creating backend resources for model buffers.
   // It also contains the LoRA input signature information
   static absl::StatusOr<std::unique_ptr<LoraManager>> Create(
-      const litert::CompiledModel& compiled_model);
+      const litert::CompiledModel& compiled_model,
+      absl::string_view decode_signature_name = "decode");
 
   // Returns the current LoRA ID.
   std::optional<uint32_t> GetCurrentLoRAId() const { return current_lora_id_; }
@@ -78,14 +79,39 @@ class LoraManager {
   absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
   GetLoRABuffers(absl::string_view signature) const;
 
+  // Returns LoRA buffers appropriate for a per-context dispatch. When the
+  // caller's context has a `lora_id` (i.e. its session scoped a LoRA), the
+  // buffers from that specific LoRA are returned. Otherwise — including
+  // when LoraManager's `current_lora_id_` is set by a sibling session on
+  // the same engine — a lazily-created null LoRA's zero buffers are
+  // returned. Use this from the executor's per-call Bind*And-Run path so
+  // each session gets its own LoRA without leaking the engine-scoped
+  // `current_lora_id_` state across sessions.
+  //
+  // The null-LoRA path keeps GPU-aware buffer allocation (Metal/WebGPU
+  // delegate-managed tensors) on every prefill+decode call. Bypassing it
+  // for non-LoRA sessions feeds uninitialized memory into the LoRA branch
+  // of attention and the model emits pad tokens / template echo.
+  absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
+  GetLoRABuffersOrZero(absl::string_view signature,
+                       std::optional<uint32_t> context_lora_id);
+
  private:
-  explicit LoraManager(const litert::CompiledModel& compiled_model);
+  explicit LoraManager(const litert::CompiledModel& compiled_model,
+                       absl::string_view decode_signature_name);
+
+  // Lazily build a null LoRA — same allocation path as a real LoRA but
+  // every tensor is zero-filled. Constant cost (one CreateInputBuffer per
+  // LoRA tensor on the requested signature); cached in null_lora_.
+  absl::Status EnsureNullLora();
 
   const litert::CompiledModel& compiled_model_;
+  std::string decode_signature_name_;
 
   absl::flat_hash_map<uint32_t, std::unique_ptr<LoraData>> lora_data_;
   absl::flat_hash_map<uint32_t, std::unique_ptr<LoRA>> loras_;
   std::optional<uint32_t> current_lora_id_;
+  std::unique_ptr<LoRA> null_lora_;
 };
 
 }  // namespace litert::lm

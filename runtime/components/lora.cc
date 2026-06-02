@@ -47,8 +47,24 @@ constexpr absl::string_view kPrefillSignaturePrefix = "prefill";
 
 absl::StatusOr<std::unique_ptr<LoRA>> LoRA::Create(
     std::unique_ptr<LoraData> lora_data,
-    const litert::CompiledModel& compiled_model) {
-  auto lora = absl::WrapUnique(new LoRA(std::move(lora_data), compiled_model));
+    const litert::CompiledModel& compiled_model,
+    absl::string_view decode_signature_name) {
+  auto lora = absl::WrapUnique(
+      new LoRA(std::move(lora_data), compiled_model, decode_signature_name));
+  RETURN_IF_ERROR(lora->Init());
+  return lora;
+}
+
+absl::StatusOr<std::unique_ptr<LoRA>> LoRA::CreateEmpty(
+    const litert::CompiledModel& compiled_model,
+    absl::string_view decode_signature_name) {
+  // Null lora_data_ → InitForSignature treats every LoRA-named input as
+  // "not in LoraData" and falls through to the memset(0) branch. Allocation
+  // still goes through CreateInputBuffer on the same signature the real
+  // path uses, so on GPU backends the resulting TensorBuffer has the
+  // delegate-managed type the Metal/WebGPU subgraph expects.
+  auto lora = absl::WrapUnique(
+      new LoRA(/*lora_data=*/nullptr, compiled_model, decode_signature_name));
   RETURN_IF_ERROR(lora->Init());
   return lora;
 }
@@ -57,7 +73,7 @@ absl::Status LoRA::Init() {
   // Eagerly populate only the decode signature. Prefill signatures get filled
   // lazily on first GetLoRABuffers(prefill_signature) call — see comment in
   // lora.h on why eager prefill fill breaks chat sessions on GPU backends.
-  return InitForSignature(kDecodeSignatureRunner);
+  return InitForSignature(decode_signature_name_);
 }
 
 absl::Status LoRA::InitForSignature(absl::string_view signature) const {
@@ -82,7 +98,7 @@ absl::Status LoRA::InitForSignature(absl::string_view signature) const {
     LITERT_ASSIGN_OR_RETURN(auto tensor_buffer_size,
                             tensor_buffer.PackedSize());
 
-    if (lora_data_->HasTensor(input_name)) {
+    if (lora_data_ != nullptr && lora_data_->HasTensor(input_name)) {
       ASSIGN_OR_RETURN(auto lora_tensor_data,
                        lora_data_->ReadTensor(input_name));
       RET_CHECK_EQ(tensor_buffer_size, lora_tensor_data->Size())
@@ -92,6 +108,9 @@ absl::Status LoRA::InitForSignature(absl::string_view signature) const {
       std::memcpy(lock_and_addr.second, lora_tensor_data->Data(),
                   lora_tensor_data->Size());
     } else {
+      // Either no LoRA data attached (null-LoRA fallback) or this tensor
+      // isn't present in the bound LoRA file — zero-fill via the
+      // delegate-aware lock+memset path so GPU storage actually sees zeros.
       std::memset(lock_and_addr.second, 0, tensor_buffer_size);
     }
     buffers[std::string(input_name)] = std::move(tensor_buffer);
@@ -103,7 +122,7 @@ absl::Status LoRA::InitForSignature(absl::string_view signature) const {
 
 absl::StatusOr<litert::TensorBuffer> LoRA::GetLoRABuffer(
     const std::string& name) const {
-  auto sig_it = per_signature_lora_buffers_.find(kDecodeSignatureRunner);
+  auto sig_it = per_signature_lora_buffers_.find(decode_signature_name_);
   if (sig_it == per_signature_lora_buffers_.end()) {
     return absl::FailedPreconditionError(
         "LoRA decode signature buffers not initialized.");
@@ -118,7 +137,7 @@ absl::StatusOr<litert::TensorBuffer> LoRA::GetLoRABuffer(
 
 absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
 LoRA::GetLoRABuffers() const {
-  return GetLoRABuffers(kDecodeSignatureRunner);
+  return GetLoRABuffers(decode_signature_name_);
 }
 
 absl::StatusOr<absl::flat_hash_map<absl::string_view, litert::TensorBuffer>>
@@ -130,7 +149,12 @@ LoRA::GetLoRABuffers(absl::string_view signature) const {
     // binds LoRA on prefill asks for them. Only accept signatures that look
     // like prefill (or decode, defensively) — refuse arbitrary names so a
     // misspelled caller doesn't silently allocate buffers for a wrong graph.
-    const bool is_decode = (signature == kDecodeSignatureRunner);
+    // Accept either "decode" (legacy / single-signature models) or
+    // whatever decode signature name this LoRA was created with (e.g.
+    // "decode_classifier" for dual-sig models). Prefill signatures match
+    // by prefix as before.
+    const bool is_decode = (signature == kDecodeSignatureRunner ||
+                            signature == decode_signature_name_);
     const bool is_prefill =
         absl::StartsWith(signature, kPrefillSignaturePrefix);
     if (!is_decode && !is_prefill) {

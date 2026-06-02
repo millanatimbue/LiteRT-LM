@@ -279,6 +279,32 @@ class ExecutorSettingsBase {
     scoped_program_cache_file_ = std::move(cache_file);
   }
 
+  // Engine-level signature names. Default to the conventional "decode" and
+  // "prefill" prefixes used by upstream litert-community models. For models
+  // exported with multiple variant graphs in the same .litertlm — e.g.
+  // bouncer's dual-signature build that ships `decode_chat`+`decode_classifier`
+  // and `prefill_128_chat`+`prefill_128_classifier` — each Engine instance
+  // declares which variant it owns by setting the decode signature name (an
+  // exact match) and the prefill signature name filter (a substring every
+  // prefill signature this engine should consider must contain). This makes
+  // engine-init buffer allocation, prefill-signature discovery, and runtime
+  // decode dispatch all hit the same variant.
+  const std::string& GetDecodeSignatureName() const {
+    return decode_signature_name_;
+  }
+  void SetDecodeSignatureName(absl::string_view name) {
+    decode_signature_name_ = std::string(name);
+  }
+  // Substring that prefill signatures must contain to be considered for this
+  // engine. Empty by default — matches all signatures with the "prefill"
+  // prefix, the upstream convention.
+  const std::string& GetPrefillSignatureFilter() const {
+    return prefill_signature_filter_;
+  }
+  void SetPrefillSignatureFilter(absl::string_view filter) {
+    prefill_signature_filter_ = std::string(filter);
+  }
+
  protected:
   explicit ExecutorSettingsBase(ModelAssets model_assets)
       : model_assets_(std::move(model_assets)) {}
@@ -314,6 +340,10 @@ class ExecutorSettingsBase {
   // Optional setting to enable mixed precision. If true, it will override
   // activation data type to FP32 which underlying for mix precision.
   bool enable_mixed_precision_ = false;
+
+  // See GetDecodeSignatureName() / GetPrefillSignatureFilter() above.
+  std::string decode_signature_name_ = "decode";
+  std::string prefill_signature_filter_;
 
   // Optional LoRA model assets.
   std::optional<ModelAssets> lora_model_assets_;

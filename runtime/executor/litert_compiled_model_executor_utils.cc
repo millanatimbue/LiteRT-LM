@@ -217,12 +217,23 @@ absl::Status GetKVCacheRootNames(std::vector<absl::string_view> input_names,
 
 absl::StatusOr<SortedPrefillSignatureMap> GetPrefillRunnerSetFromModel(
     const ::litert::Model& model, absl::string_view signature_name_base,
-    absl::string_view input_positions_name) {
+    absl::string_view input_positions_name,
+    absl::string_view signature_filter) {
   SortedPrefillSignatureMap prefill_runner_set;
   auto signatures = model.GetSignatures();
   for (auto& signature : *signatures) {
-    if (auto signature_key = signature.Key();
-        absl::StartsWith(signature_key, signature_name_base)) {
+    auto signature_key = signature.Key();
+    if (!absl::StartsWith(signature_key, signature_name_base)) continue;
+    // Skip prefill signatures that don't belong to this engine's variant.
+    // For single-signature models the filter is empty (matches all). For
+    // multi-variant models (e.g. bouncer's prefill_128_chat vs
+    // prefill_128_classifier) each engine sets the filter to its variant
+    // suffix so prefill picks the matching one.
+    if (!signature_filter.empty() &&
+        !absl::StrContains(signature_key, signature_filter)) {
+      continue;
+    }
+    {
       LITERT_ASSIGN_OR_RETURN(auto input_positions_tensor,
                               signature.InputTensor(input_positions_name));
       LITERT_ASSIGN_OR_RETURN(auto ranked_tensor_type,

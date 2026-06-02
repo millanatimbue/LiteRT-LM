@@ -58,6 +58,24 @@ public struct EngineConfig {
   /// application has write access. If `nil`, it uses the directory of the `modelPath`.
   public let cacheDir: String?
 
+  /// Engine-level decode signature this Engine owns. For single-signature
+  /// `.litertlm` files this is always `"decode"` (the upstream convention)
+  /// and can be left `nil`. For multi-variant models that ship more than
+  /// one decode signature in the same file (e.g. bouncer's `decode_chat` +
+  /// `decode_classifier`), each `Engine` instance declares which variant
+  /// it serves by passing the exact signature name here. The engine's
+  /// init-time buffer allocation, prefill discovery, LoRA buffer
+  /// population, and per-call decode dispatch all run against this
+  /// signature.
+  public let decodeSignatureName: String?
+
+  /// Substring every prefill signature this Engine should consider must
+  /// contain. Empty / `nil` matches every signature whose name starts with
+  /// `"prefill"` (upstream behavior). For multi-variant models this is the
+  /// per-engine filter (e.g. `"_chat"` or `"_classifier"`) that picks
+  /// exactly the prefill variant matching this engine's decode signature.
+  public let prefillSignatureFilter: String?
+
   /// - Parameters:
   ///   - modelPath: The file path to the LiteRT-LM model.
   ///   - backend: The backend to use for the engine.
@@ -70,12 +88,18 @@ public struct EngineConfig {
   ///     model or the engine.
   ///   - cacheDir: The directory for placing cache files. It should be a directory where the
   ///     application has write access. If `nil`, it uses the directory of the `modelPath`.
+  ///   - decodeSignatureName: Exact name of the decode signature this Engine owns. Default
+  ///     `nil` → runtime uses `"decode"`. Required for multi-variant `.litertlm` files.
+  ///   - prefillSignatureFilter: Substring filter for prefill signatures (see field doc above).
+  ///     Default `nil` → runtime matches any signature with the `"prefill"` prefix.
   /// - Throws: `LiteRTLMError` if `maxNumTokens` is less than or equal to 0.
   public init(
     modelPath: String, backend: Backend = .cpu(), visionBackend: Backend? = nil,
     audioBackend: Backend? = nil,
     maxNumTokens: Int? = nil,
-    cacheDir: String? = nil
+    cacheDir: String? = nil,
+    decodeSignatureName: String? = nil,
+    prefillSignatureFilter: String? = nil
   ) throws {
     if let maxNumTokens, maxNumTokens <= 0 {
       throw LiteRTLMError.config(.invalidMaxNumTokens)
@@ -86,6 +110,8 @@ public struct EngineConfig {
     self.audioBackend = audioBackend
     self.maxNumTokens = maxNumTokens
     self.cacheDir = cacheDir
+    self.decodeSignatureName = decodeSignatureName
+    self.prefillSignatureFilter = prefillSignatureFilter
   }
 }
 
@@ -172,6 +198,16 @@ public struct ConversationConfig {
   /// additional response tokens. `nil` leaves the engine default in place.
   public let maxOutputTokens: Int?
 
+  /// When `true`, the conversation prefills the user message verbatim — no
+  /// chat-template wrapping (`<start_of_turn>user\n...<end_of_turn>\n
+  /// <start_of_turn>model\n` for Gemma) is applied before tokenization. Use
+  /// for classifier-head sessions whose pooling reads `hidden_states[:, -1, :]`
+  /// and was trained on raw text: chat-templated input puts a boundary token
+  /// at position -1 which carries no document content, collapsing the head's
+  /// discriminative range. Leave at the default `false` for chat / generation
+  /// flows — those need the chat template Gemma was trained against.
+  public let skipChatTemplate: Bool
+
   /// - Parameters:
   ///   - systemMessage: The system message to be used in the conversation.
   ///   - initialMessages: The initial messages to populate the conversation history.
@@ -183,6 +219,8 @@ public struct ConversationConfig {
   ///   - scopedLoraFile: Path to a LoRA adapter `.tflite` to hot-swap for
   ///     this conversation's underlying session.
   ///   - maxOutputTokens: Cap on decode steps. Set to `1` for classification.
+  ///   - skipChatTemplate: Bypass chat-template wrapping; required for
+  ///     classifier-head sessions. See doc on `skipChatTemplate` above.
   public init(
     systemMessage: Message? = nil,
     initialMessages: [Message] = [],
@@ -190,7 +228,8 @@ public struct ConversationConfig {
     samplerConfig: SamplerConfig? = nil,
     prefillPrefaceOnInit: Bool = false,
     scopedLoraFile: URL? = nil,
-    maxOutputTokens: Int? = nil
+    maxOutputTokens: Int? = nil,
+    skipChatTemplate: Bool = false
   ) {
     self.systemMessage = systemMessage.map { msg in
       msg.role == .system
@@ -202,5 +241,6 @@ public struct ConversationConfig {
     self.prefillPrefaceOnInit = prefillPrefaceOnInit
     self.scopedLoraFile = scopedLoraFile
     self.maxOutputTokens = maxOutputTokens
+    self.skipChatTemplate = skipChatTemplate
   }
 }

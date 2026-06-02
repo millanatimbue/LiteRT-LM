@@ -367,7 +367,7 @@ LoraManager* LlmLiteRtCompiledModelExecutorBase::lora_manager() {
   if (compiled_model_ == nullptr) {
     return nullptr;
   }
-  auto created = LoraManager::Create(*compiled_model_);
+  auto created = LoraManager::Create(*compiled_model_, decode_signature_name_);
   if (!created.ok()) {
     return nullptr;
   }
@@ -451,6 +451,13 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::CreatePrefillInputBuffers(
     prefill_input_buffers[signatures_.input_int32_param.value()] =
         std::move(*param_tensor_buffer);
   }
+  // LoRA-named inputs are bound at the per-call layer in
+  // BindTensorsAndRunPrefill via LoraManager::GetLoRABuffersOrZero(), which
+  // hands out delegate-aware buffers from a real LoRA when one's scoped or
+  // from a lazily-created null LoRA (all zeros) otherwise. Don't allocate
+  // LoRA buffers here — doing it via compiled_model_->CreateInputBuffer at
+  // this layer can produce host-memory buffers whose allocation_type the
+  // Metal delegate later rejects with kTfLiteCustom != kTfLitePersistentRo.
   return absl::OkStatus();
 }
 
@@ -746,18 +753,19 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
   // The compiled model graph must declare the LoRA inputs in this signature
   // for binding to take effect; we pass `prefill_signature` to LoraManager so
   // it returns buffers shaped for this specific signature's runner.
+  // Always bind LoRA tensors via LoraManager so the delegate-aware
+  // allocation path (Metal/WebGPU/CPU) is consistent regardless of whether
+  // this context has a scoped LoRA. The per-context lora_id picks which
+  // adapter to bind — a real one when set, a null/zero LoRA otherwise.
+  // Reading the id from THIS context's processed_context, not from
+  // LoraManager's engine-scoped current_lora_id_, keeps a sibling session's
+  // adapter from leaking into a session that didn't scope one.
   const std::optional<uint32_t> prefill_lora_id =
       llm_context_->processed_context().lora_id();
-  ABSL_LOG(INFO) << "[LoRA-DBG] BindTensorsAndRunPrefill: signature="
-                 << prefill_signature << " context_lora_id="
-                 << (prefill_lora_id.has_value()
-                         ? absl::StrCat(*prefill_lora_id)
-                         : std::string("none"))
-                 << " lora_manager_set="
-                 << (lora_manager_ != nullptr);
-  if (lora_manager_ != nullptr && prefill_lora_id.has_value()) {
+  if (lora_manager_ != nullptr) {
     ASSIGN_OR_RETURN(auto lora_buffers,
-                     lora_manager_->GetLoRABuffers(prefill_signature));
+                     lora_manager_->GetLoRABuffersOrZero(prefill_signature,
+                                                         prefill_lora_id));
     for (auto& [input_name, input_buffer] : lora_buffers) {
       input_buffers[input_name] = std::move(input_buffer);
     }
@@ -972,34 +980,17 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
   // sessions. Pass the active decode signature name (typically "decode") so
   // LoraManager returns buffers created via CreateInputBuffer on that
   // signature — required for LiteRT's per-signature buffer-type compatibility.
+  // Same per-context dispatch as BindTensorsAndRunPrefill — see comment
+  // there. LoraManager hands back either the bound LoRA's buffers (when
+  // this session scoped one via processed_context().lora_id()) or a null
+  // LoRA's zero buffers, both allocated via the delegate-aware path so
+  // Metal/WebGPU/CPU all see consistently-typed tensors.
   const std::optional<uint32_t> decode_lora_id =
       llm_context_->processed_context().lora_id();
-  ABSL_LOG(INFO) << "[LoRA-DBG] BindTensorsAndRunDecode: signature="
-                 << signature_name << " context_lora_id="
-                 << (decode_lora_id.has_value()
-                         ? absl::StrCat(*decode_lora_id)
-                         : std::string("none"))
-                 << " lora_manager_set="
-                 << (lora_manager_ != nullptr);
-  // Dump classifier_logits BEFORE we run decode so we can tell whether
-  // the call mutates the buffer or leaves stale state from a prior run.
-  for (const auto& [name, buf] : decode_output_buffers_) {
-    if (name == "classifier_logits") {
-      LITERT_ASSIGN_OR_RETURN(auto dup, buf.Duplicate());
-      auto vals = CopyFromTensorBuffer<float>(dup);
-      if (vals.HasValue()) {
-        const auto& v = vals.Value();
-        ABSL_LOG(INFO) << "[AUX-DBG] pre-decode classifier_logits[0..3]="
-                       << (v.size() > 0 ? v[0] : 0.f) << ","
-                       << (v.size() > 1 ? v[1] : 0.f) << ","
-                       << (v.size() > 2 ? v[2] : 0.f) << ","
-                       << (v.size() > 3 ? v[3] : 0.f);
-      }
-    }
-  }
-  if (lora_manager_ != nullptr && decode_lora_id.has_value()) {
+  if (lora_manager_ != nullptr) {
     ASSIGN_OR_RETURN(auto lora_buffers,
-                     lora_manager_->GetLoRABuffers(signature_name));
+                     lora_manager_->GetLoRABuffersOrZero(signature_name,
+                                                         decode_lora_id));
     for (auto& [input_name, input_buffer] : lora_buffers) {
       decode_input_buffers[input_name] = std::move(input_buffer);
     }
@@ -1028,23 +1019,6 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
 
   if (!gpu_optimized_single_buffer_cache_) {
     std::swap(input_kv_cache_buffers_, output_kv_cache_buffers_);
-  }
-  // Dump classifier_logits AFTER decode to confirm whether the runtime
-  // actually wrote new values. If post == pre, the model graph isn't
-  // producing classifier output (or the write got dropped).
-  for (const auto& [name, buf] : decode_output_buffers_) {
-    if (name == "classifier_logits") {
-      LITERT_ASSIGN_OR_RETURN(auto dup, buf.Duplicate());
-      auto vals = CopyFromTensorBuffer<float>(dup);
-      if (vals.HasValue()) {
-        const auto& v = vals.Value();
-        ABSL_LOG(INFO) << "[AUX-DBG] post-decode classifier_logits[0..3]="
-                       << (v.size() > 0 ? v[0] : 0.f) << ","
-                       << (v.size() > 1 ? v[1] : 0.f) << ","
-                       << (v.size() > 2 ? v[2] : 0.f) << ","
-                       << (v.size() > 3 ? v[3] : 0.f);
-      }
-    }
   }
   return absl::OkStatus();
 }
@@ -1240,10 +1214,6 @@ absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
 
 absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
     const ExecutorInputs& inputs, const ExecutorDecodeParams& decode_params) {
-  ABSL_LOG(INFO) << "[DBG] DecodeLogits enter: current_step="
-                 << llm_context_->runtime_state().current_step
-                 << " ran_decode="
-                 << llm_context_->runtime_state().ran_decode;
   LITERT_ASSIGN_OR_RETURN(
       auto output_logits,
       decode_output_buffers_[signatures_.output_logits].Duplicate());
@@ -1251,8 +1221,6 @@ absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
   bool last_run_is_decode = llm_context_->runtime_state().ran_decode;
   RETURN_IF_ERROR(PrepareFirstDecode());
   ASSIGN_OR_RETURN(auto step_and_token, GetTokenToDecode(inputs));
-  ABSL_LOG(INFO) << "[DBG] DecodeLogits about to DecodeInternal: token_count="
-                 << step_and_token.token.size();
   RETURN_IF_ERROR(DecodeInternal(step_and_token.token, output_logits));
   RETURN_IF_ERROR(ConsumePendingOrAddProcessedToken(step_and_token.token));
 
@@ -1375,14 +1343,18 @@ LlmLiteRtCompiledModelExecutorBase::GetAuxiliaryOutput(
 
 absl::StatusOr<std::string>
 LlmLiteRtCompiledModelExecutorBase::GetPrefillSignatureKey() const {
+  const std::string& prefill_filter =
+      executor_settings_.GetPrefillSignatureFilter();
   std::string prefill_signature_key;
   for (int i = 0; i < model_.GetNumSignatures(); ++i) {
     LITERT_ASSIGN_OR_RETURN(auto sig, model_.GetSignature(i));
     absl::string_view key = sig.Key();
-    if (absl::StartsWith(key, kPrefillSignatureRunner)) {
-      prefill_signature_key = key;
-      break;
+    if (!absl::StartsWith(key, kPrefillSignatureRunner)) continue;
+    if (!prefill_filter.empty() && !absl::StrContains(key, prefill_filter)) {
+      continue;
     }
+    prefill_signature_key = key;
+    break;
   }
   RET_CHECK(!prefill_signature_key.empty());
   return prefill_signature_key;
@@ -1499,13 +1471,13 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::InitializeSampler(
     if (!decode_prev_input_pos_) {
       LITERT_ASSIGN_OR_RETURN(
           decode_prev_input_pos_,
-          compiled_model_->CreateInputBuffer(kDecodeSignatureRunner,
+          compiled_model_->CreateInputBuffer(decode_signature_name_,
                                              signatures_.input_positions));
     }
     if (!decode_prev_mask_ && signatures_.input_attn_mask.has_value()) {
       LITERT_ASSIGN_OR_RETURN(
           decode_prev_mask_,
-          compiled_model_->CreateInputBuffer(kDecodeSignatureRunner,
+          compiled_model_->CreateInputBuffer(decode_signature_name_,
                                              *signatures_.input_attn_mask));
     }
     // Set, then reset the input handling to get the underlying model ready, but
@@ -1725,14 +1697,26 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
     return absl::InternalError("Failed to build LiteRt model");
   }
 
+  // Resolve which decode + prefill signatures this engine owns. For
+  // single-signature upstream models the defaults pick out "decode" and the
+  // first "prefill*" signature. For multi-variant models (e.g. bouncer's
+  // dual-sig export with decode_chat / decode_classifier and
+  // prefill_128_chat / prefill_128_classifier) the engine declares the
+  // variant via ExecutorSettings.
+  const std::string& configured_decode_name =
+      executor_settings.GetDecodeSignatureName();
+  const std::string& prefill_filter =
+      executor_settings.GetPrefillSignatureFilter();
   absl::string_view prefill_signature_key = "";
   for (int i = 0; i < litert_model->GetNumSignatures(); ++i) {
     LITERT_ASSIGN_OR_RETURN(auto sig, litert_model->GetSignature(i));
     absl::string_view key = sig.Key();
-    if (absl::StartsWith(key, kPrefillSignatureRunner)) {
-      prefill_signature_key = key;
-      break;
+    if (!absl::StartsWith(key, kPrefillSignatureRunner)) continue;
+    if (!prefill_filter.empty() && !absl::StrContains(key, prefill_filter)) {
+      continue;
     }
+    prefill_signature_key = key;
+    break;
   }
   LITERT_ASSIGN_OR_RETURN(auto prefill_signature,
                           litert_model->FindSignature(prefill_signature_key));
@@ -1742,7 +1726,7 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
       prefill_signature.InputNames(), prefill_signature.OutputNames(),
       kv_cache_k_root_name, kv_cache_v_root_name));
   LITERT_ASSIGN_OR_RETURN(auto decode_signature,
-                          litert_model->FindSignature(kDecodeSignatureRunner));
+                          litert_model->FindSignature(configured_decode_name));
   ASSIGN_OR_RETURN(
       ModelSignatures signatures,
       GetModelSignaturesFromInputOutputNames(decode_signature.InputNames(),
@@ -1836,16 +1820,20 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
   }
 
   for (auto input_name : decode_signature.InputNames()) {
-    if (IsLoRAInputName(input_name)) {
-      // We let LoraManager handle LoRA inputs.
+    if (IsKVCacheTensor(input_name)) {
       continue;
     }
-    if (IsKVCacheTensor(input_name)) {
+    if (IsLoRAInputName(input_name)) {
+      // LoRA-named inputs are bound at the per-call layer in
+      // BindTensorsAndRunDecode via LoraManager::GetLoRABuffersOrZero(),
+      // which uses the delegate-aware allocation path real LoRAs use. See
+      // the comment in BindTensorsAndRunDecode for why allocating these
+      // buffers here is wrong on GPU backends.
       continue;
     }
     LITERT_ASSIGN_OR_RETURN(
         auto input_buffer,
-        compiled_model->CreateInputBuffer(kDecodeSignatureRunner, input_name));
+        compiled_model->CreateInputBuffer(configured_decode_name, input_name));
     decode_input_buffers[input_name] = std::move(input_buffer);
   }
   auto output_names = decode_signature.OutputNames();
@@ -1865,7 +1853,7 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
         sampler_backend.ok() && *sampler_backend == Backend::GPU) {
       LITERT_ASSIGN_OR_RETURN(
           size_t signature_index,
-          compiled_model->GetSignatureIndex(kDecodeSignatureRunner));
+          compiled_model->GetSignatureIndex(configured_decode_name));
       LITERT_ASSIGN_OR_RETURN(
           auto output_buffer,
           CreateFP16OutputBuffer(lrt_env, *compiled_model, signature_index,
@@ -1874,7 +1862,7 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
     } else {
       LITERT_ASSIGN_OR_RETURN(auto output_buffer,
                               compiled_model->CreateOutputBuffer(
-                                  kDecodeSignatureRunner, output_name));
+                                  configured_decode_name, output_name));
 
       decode_output_buffers[output_name] = std::move(output_buffer);
     }
@@ -1905,7 +1893,7 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
           absl::StartsWith(input_name, kv_cache_v_root_name)) {
         LITERT_ASSIGN_OR_RETURN(auto input_buffer,
                                 compiled_model->CreateInputBuffer(
-                                    kDecodeSignatureRunner, input_name));
+                                    configured_decode_name, input_name));
         if (clear_kv_cache_before_prefill) {
           LITERT_RETURN_IF_ERROR(input_buffer.Clear());
         }
@@ -1917,7 +1905,7 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
           absl::StartsWith(output_name, kv_cache_v_root_name)) {
         LITERT_ASSIGN_OR_RETURN(auto output_buffer,
                                 compiled_model->CreateOutputBuffer(
-                                    kDecodeSignatureRunner, output_name));
+                                    configured_decode_name, output_name));
         (*decode_output_kv_cache_buffers)[output_name] =
             std::move(output_buffer);
       }
@@ -1927,7 +1915,8 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
   ASSIGN_OR_RETURN(auto prefill_runner_set,
                    GetPrefillRunnerSetFromModel(
                        *litert_model, kPrefillSignatureRunner,
-                       /*input_positions_name=*/signatures.input_positions));
+                       /*input_positions_name=*/signatures.input_positions,
+                       /*signature_filter=*/prefill_filter));
   RET_CHECK(!prefill_runner_set.empty()) << "No prefill runner available.";
 
   std::unique_ptr<EmbeddingLookupManager> embedding_lookup;
@@ -2145,6 +2134,11 @@ absl::StatusOr<std::unique_ptr<LlmLiteRtCompiledModelExecutorDynamic>>
 LlmLiteRtCompiledModelExecutorDynamic::Create(
     LlmExecutorSettings executor_settings, Environment& lrt_env,
     ModelResources& resources) {
+  const std::string& configured_decode_name =
+      executor_settings.GetDecodeSignatureName();
+  const std::string& prefill_filter =
+      executor_settings.GetPrefillSignatureFilter();
+  (void)prefill_filter;  // Dynamic path doesn't enumerate prefill signatures.
   ASSIGN_OR_RETURN(auto litert_model,
                    resources.GetTFLiteModel(ModelType::kTfLitePrefillDecode));
   ASSIGN_OR_RETURN(
@@ -2207,7 +2201,7 @@ LlmLiteRtCompiledModelExecutorDynamic::Create(
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_output_buffers;
 
   LITERT_ASSIGN_OR_RETURN(auto decode_signature,
-                          litert_model->FindSignature(kDecodeSignatureRunner));
+                          litert_model->FindSignature(configured_decode_name));
   std::string kv_cache_k_root_name;
   std::string kv_cache_v_root_name;
   RETURN_IF_ERROR(GetKVCacheRootNames(
@@ -2240,7 +2234,7 @@ LlmLiteRtCompiledModelExecutorDynamic::Create(
     if (!is_kv_cache_input && !is_attn_mask_input) {
       LITERT_ASSIGN_OR_RETURN(auto input_buffer,
                               compiled_model->CreateInputBuffer(
-                                  kDecodeSignatureRunner, input_name));
+                                  configured_decode_name, input_name));
       decode_input_buffers[input_name] = std::move(input_buffer);
     }
   }
@@ -2249,7 +2243,7 @@ LlmLiteRtCompiledModelExecutorDynamic::Create(
         !absl::StartsWith(output_name, kv_cache_v_root_name)) {
       LITERT_ASSIGN_OR_RETURN(auto output_buffer,
                               compiled_model->CreateOutputBuffer(
-                                  kDecodeSignatureRunner, output_name));
+                                  configured_decode_name, output_name));
       decode_output_buffers[output_name] = std::move(output_buffer);
     }
   }

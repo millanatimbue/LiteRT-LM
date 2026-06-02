@@ -209,6 +209,11 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
         env_(env),
         model_(*model),
         compiled_model_(std::move(compiled_model)),
+        // Initialize the runtime decode-signature name from settings so the
+        // executor's per-call decode dispatches to the signature the engine
+        // was built for, not the hardcoded "decode" default. SessionConfig
+        // can still override per-session via SetDecodeSignatureName.
+        decode_signature_name_(executor_settings_.GetDecodeSignatureName()),
         decode_input_buffers_(std::move(decode_input_buffers)),
         decode_output_buffers_(std::move(decode_output_buffers)),
         kv_cache_buffers_1_(std::move(input_kv_cache_buffers)),

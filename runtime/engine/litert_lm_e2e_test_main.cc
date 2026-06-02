@@ -101,6 +101,14 @@ ABSL_FLAG(bool, double_engine, false,
           "If true, build TWO engines pointing at the same model file and "
           "report RSS after each. Used to measure whether mmap'd file "
           "pages are physically shared between the two engines.");
+ABSL_FLAG(std::string, decode_signature_name, "",
+          "If non-empty, set the engine's decode signature name to this. Use "
+          "with multi-variant .litertlm files that ship more than one decode "
+          "signature (e.g. bouncer's decode_chat / decode_classifier).");
+ABSL_FLAG(std::string, prefill_signature_filter, "",
+          "If non-empty, only consider prefill signatures whose name "
+          "contains this substring (e.g. \"_chat\" / \"_classifier\"). Pairs "
+          "with --decode_signature_name for multi-variant models.");
 ABSL_FLAG(std::string, system_message,
           "You are a moderation classifier. For each post, output exactly "
           "one row of pipe-delimited verdicts (yes or no), one per "
@@ -196,8 +204,19 @@ bool LogitsLookSane(const std::vector<float>& logits) {
 }
 
 absl::StatusOr<std::unique_ptr<Conversation>> BuildChatBase(
-    litert::lm::Engine& engine, absl::string_view system_message) {
+    litert::lm::Engine& engine, absl::string_view system_message,
+    absl::string_view lora_path) {
   auto session_config = SessionConfig::CreateDefault();
+  // The bouncer model is a LoRA-finetune — chat decode produces only <pad>
+  // tokens without the adapter bound. So we scope it onto the chat base too,
+  // and Clone() inherits the binding.
+  if (!lora_path.empty()) {
+    ASSIGN_OR_RETURN(::litert::ScopedFile scoped_file,
+                     ::litert::ScopedFile::Open(std::string(lora_path)));
+    auto file_ptr =
+        std::make_shared<::litert::ScopedFile>(std::move(scoped_file));
+    session_config.SetScopedLoraFile(file_ptr);
+  }
   ASSIGN_OR_RETURN(auto cc, ConversationConfig::Builder()
                                 .SetSessionConfig(session_config)
                                 .SetPreface(litert::lm::JsonPreface{
@@ -228,25 +247,31 @@ absl::StatusOr<std::string> RunChatSync(litert::lm::Engine& engine,
   ASSIGN_OR_RETURN(auto cloned, base.Clone());
   json content_list = json::array();
   content_list.push_back({{"type", "text"}, {"text", std::string(user_prompt)}});
-  RETURN_IF_ERROR(cloned->SendMessageAsync(
-      json::object({{"role", "user"}, {"content", content_list}}),
-      [](absl::StatusOr<Message> /*m*/) {}));
+  // Use the synchronous SendMessage so we can capture the full assistant
+  // response. This is what iOS does (`response.toString` in Swift).
+  ASSIGN_OR_RETURN(
+      Message response,
+      cloned->SendMessage(
+          json::object({{"role", "user"}, {"content", content_list}})));
+  // Belt-and-suspenders flush.
   RETURN_IF_ERROR(engine.WaitUntilDone(absl::Minutes(2)));
-  // Belt-and-suspenders: call WaitUntilDone again to flush any straggler
-  // tasks. SendMessageAsync queues prefill + per-token decode tasks; if the
-  // first WaitUntilDone returned before the decode finished we'd silently
-  // leave the engine busy, which then breaks the next classifier session's
-  // own decode step.
-  RETURN_IF_ERROR(engine.WaitUntilDone(absl::Minutes(2)));
-  std::cout << "[e2e-dbg] RunChatSync: WaitUntilDone returned ok\n"
-            << std::flush;
-  // We don't have a clean way to capture the streamed text from the
-  // callback's discarded result; the harness's "is sane" check is on the
-  // chat path's *internal state* via the next call still working, plus
-  // whether the next classifyText sees corruption. So we treat empty
-  // returned string as "fired ok" and rely on the subsequent classifyText
-  // to validate that chat didn't leave a poisoned engine state.
-  return std::string("");
+
+  // Extract concatenated text from the assistant content blocks.
+  std::string text;
+  if (response.contains("content")) {
+    const auto& content = response["content"];
+    if (content.is_string()) {
+      text = content.get<std::string>();
+    } else if (content.is_array()) {
+      for (const auto& part : content) {
+        if (part.is_object() && part.contains("text") &&
+            part["text"].is_string()) {
+          text += part["text"].get<std::string>();
+        }
+      }
+    }
+  }
+  return text;
 }
 
 absl::StatusOr<std::vector<float>> RunClassifierOnce(
@@ -311,10 +336,20 @@ absl::Status MainHelper(int argc, char** argv) {
   ASSIGN_OR_RETURN(Backend backend,
                    litert::lm::GetBackendFromString(backend_str));
 
+  const std::string decode_sig = absl::GetFlag(FLAGS_decode_signature_name);
+  const std::string prefill_filter =
+      absl::GetFlag(FLAGS_prefill_signature_filter);
   auto build_engine = [&]() -> absl::StatusOr<std::unique_ptr<litert::lm::Engine>> {
     ASSIGN_OR_RETURN(ModelAssets assets, ModelAssets::Create(model_path));
     ASSIGN_OR_RETURN(EngineSettings s, EngineSettings::CreateDefault(
                                           std::move(assets), backend));
+    if (!decode_sig.empty()) {
+      s.GetMutableMainExecutorSettings().SetDecodeSignatureName(decode_sig);
+    }
+    if (!prefill_filter.empty()) {
+      s.GetMutableMainExecutorSettings().SetPrefillSignatureFilter(
+          prefill_filter);
+    }
     return litert::lm::EngineFactory::Create(
         litert::lm::EngineFactory::EngineType::kAdvancedLiteRTCompiledModel,
         std::move(s));
@@ -339,8 +374,162 @@ absl::Status MainHelper(int argc, char** argv) {
 
   std::unique_ptr<Conversation> chat_base;
   if (mode != "classifier_only") {
-    ASSIGN_OR_RETURN(chat_base, BuildChatBase(*engine, system_message));
+    // Pass empty lora_path to keep the chat base LoRA-free. The fix in
+    // CreateDecodeBuffers/CreatePrefillInputBuffers means decode now
+    // defaults LoRA-named inputs to zero, so chat without LoRA should
+    // emit base-Gemma-IT text instead of <pad>.
+    ASSIGN_OR_RETURN(chat_base,
+                     BuildChatBase(*engine, system_message,
+                                   /*lora_path=*/""));
     std::cout << "[e2e] chat base built\n";
+  }
+
+  // chat_lora mode: like chat_fresh but with LoRA scoped in. Tests whether
+  // the bug only hits when LoRA isn't bound. (If chat is fine with LoRA
+  // but broken without, the issue is the chat path's LoRA-default
+  // tensors being wrong.)
+  if (mode == "chat_lora") {
+    int failures = 0;
+    for (int i = 0; i < iterations; ++i) {
+      const absl::string_view prompt = kPrompts[i % kNumPrompts];
+      auto session_config = SessionConfig::CreateDefault();
+      auto scoped_or = ::litert::ScopedFile::Open(std::string(lora_path));
+      if (!scoped_or.ok()) {
+        std::cout << "[e2e] iter=" << i << " lora open FAILED\n";
+        ++failures; continue;
+      }
+      auto file_ptr = std::make_shared<::litert::ScopedFile>(
+          std::move(*scoped_or));
+      session_config.SetScopedLoraFile(file_ptr);
+      auto cc_or = ConversationConfig::Builder()
+                       .SetSessionConfig(session_config)
+                       .SetPreface(litert::lm::JsonPreface{
+                           .messages = json::array({json::object(
+                               {{"role", "system"},
+                                {"content", system_message}})})})
+                       .Build(*engine);
+      if (!cc_or.ok()) { ++failures; continue; }
+      auto convo_or = Conversation::Create(*engine, *cc_or);
+      if (!convo_or.ok()) { ++failures; continue; }
+      json content_list = json::array();
+      content_list.push_back({{"type", "text"}, {"text", std::string(prompt)}});
+      auto response = (*convo_or)->SendMessage(json::object(
+          {{"role", "user"}, {"content", content_list}}));
+      if (!response.ok()) {
+        std::cout << "[e2e] iter=" << i << " SendMessage FAILED: "
+                  << response.status() << "\n";
+        ++failures; continue;
+      }
+      std::string text;
+      if (response->contains("content")) {
+        const auto& content = (*response)["content"];
+        if (content.is_string()) text = content.get<std::string>();
+        else if (content.is_array()) {
+          for (const auto& part : content) {
+            if (part.is_object() && part.contains("text") &&
+                part["text"].is_string())
+              text += part["text"].get<std::string>();
+          }
+        }
+      }
+      const bool sane = ChatOutputLooksSane(text);
+      std::cout << "[e2e] iter=" << i << " chat_lora sane=" << sane
+                << " out=\"" << text.substr(0, 120) << "\"\n";
+      if (!sane) ++failures;
+    }
+    std::cout << "[e2e] done. failures=" << failures << "/" << iterations << "\n";
+    if (failures > 0)
+      return absl::InternalError("e2e harness saw failed iterations.");
+    return absl::OkStatus();
+  }
+
+  // chat_fresh mode: build a FRESH conversation per call (no shared
+  // chat_base, no clone). The conversation prefills system+user in one
+  // shot when sendMessage runs. Used to test whether the bug is in
+  // Conversation::Clone() or in the chat path itself.
+  if (mode == "chat_fresh") {
+    int failures = 0;
+    for (int i = 0; i < iterations; ++i) {
+      const absl::string_view prompt = kPrompts[i % kNumPrompts];
+      auto session_config = SessionConfig::CreateDefault();
+      auto cc_or = ConversationConfig::Builder()
+                       .SetSessionConfig(session_config)
+                       .SetPreface(litert::lm::JsonPreface{
+                           .messages = json::array({json::object(
+                               {{"role", "system"},
+                                {"content", system_message}})})})
+                       .Build(*engine);
+      if (!cc_or.ok()) {
+        std::cout << "[e2e] iter=" << i << " config build FAILED: "
+                  << cc_or.status() << "\n";
+        ++failures;
+        continue;
+      }
+      auto convo_or = Conversation::Create(*engine, *cc_or);
+      if (!convo_or.ok()) {
+        std::cout << "[e2e] iter=" << i << " Conversation::Create FAILED: "
+                  << convo_or.status() << "\n";
+        ++failures;
+        continue;
+      }
+      json content_list = json::array();
+      content_list.push_back({{"type", "text"}, {"text", std::string(prompt)}});
+      auto response = (*convo_or)->SendMessage(json::object(
+          {{"role", "user"}, {"content", content_list}}));
+      if (!response.ok()) {
+        std::cout << "[e2e] iter=" << i << " SendMessage FAILED: "
+                  << response.status() << "\n";
+        ++failures;
+        continue;
+      }
+      std::string text;
+      if (response->contains("content")) {
+        const auto& content = (*response)["content"];
+        if (content.is_string()) text = content.get<std::string>();
+        else if (content.is_array()) {
+          for (const auto& part : content) {
+            if (part.is_object() && part.contains("text") &&
+                part["text"].is_string())
+              text += part["text"].get<std::string>();
+          }
+        }
+      }
+      const bool sane = ChatOutputLooksSane(text);
+      std::cout << "[e2e] iter=" << i << " chat_fresh sane=" << sane
+                << " out=\"" << text.substr(0, 120) << "\"\n";
+      if (!sane) ++failures;
+    }
+    std::cout << "[e2e] done. failures=" << failures << "/" << iterations
+              << "\n";
+    if (failures > 0)
+      return absl::InternalError("e2e harness saw failed iterations.");
+    return absl::OkStatus();
+  }
+
+  // chat_only mode: run N consecutive chat clone+sendMessage calls. No
+  // classifier interleave. Used to confirm whether chat decode is broken
+  // independently of any LoRA/classifier session state.
+  if (mode == "chat_only") {
+    int failures = 0;
+    for (int i = 0; i < iterations; ++i) {
+      const absl::string_view prompt = kPrompts[i % kNumPrompts];
+      auto out = RunChatSync(*engine, *chat_base, prompt);
+      if (!out.ok()) {
+        std::cout << "[e2e] iter=" << i << " chat FAILED: " << out.status()
+                  << "\n";
+        ++failures;
+        continue;
+      }
+      const bool sane = ChatOutputLooksSane(*out);
+      std::cout << "[e2e] iter=" << i << " chat sane=" << sane
+                << " out=\"" << out->substr(0, 120) << "\"\n";
+      if (!sane) ++failures;
+    }
+    std::cout << "[e2e] done. failures=" << failures << "/" << iterations
+              << "\n";
+    if (failures > 0)
+      return absl::InternalError("e2e harness saw failed iterations.");
+    return absl::OkStatus();
   }
 
   // classifier_only / classifier_after_chat modes: run N consecutive
@@ -382,6 +571,12 @@ absl::Status MainHelper(int argc, char** argv) {
       ++failures;
       continue;
     }
+    const std::string& chat_text = *chat_status;
+    const bool chat_sane = ChatOutputLooksSane(chat_text);
+    std::cout << "[e2e] iter=" << i
+              << " phase=interleave chat sane=" << chat_sane
+              << " out=\"" << chat_text.substr(0, 120) << "\"\n";
+    if (!chat_sane) ++failures;
 
     // Classifier path.
     auto logits = RunClassifierOnce(*engine, lora_path, prompt);
@@ -421,6 +616,11 @@ absl::Status MainHelper(int argc, char** argv) {
       if (!chat_status.ok()) {
         std::cout << "[e2e] iter=" << i << " phase=rapid chat FAILED: "
                   << chat_status.status() << "\n";
+        ++failures;
+      } else if (!ChatOutputLooksSane(*chat_status)) {
+        std::cout << "[e2e] iter=" << i
+                  << " phase=rapid chat output insane: \""
+                  << chat_status->substr(0, 120) << "\"\n";
         ++failures;
       }
     } else {

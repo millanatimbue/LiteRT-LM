@@ -70,6 +70,17 @@ ABSL_FLAG(std::string, vision_backend, "",
           "Mirrors what the iOS app passes via EngineConfig(visionBackend:). "
           "Use this to verify a text-only .litertlm still loads when the host "
           "configures a vision backend it'll never use.");
+ABSL_FLAG(std::string, decode_signature_name, "",
+          "If non-empty, set the engine's decode signature name. Required "
+          "for multi-variant .litertlm files (e.g. bouncer's dual-sig build "
+          "with decode_chat / decode_classifier).");
+ABSL_FLAG(std::string, prefill_signature_filter, "",
+          "If non-empty, substring filter for prefill signatures, paired "
+          "with --decode_signature_name (e.g. \"_classifier\").");
+ABSL_FLAG(bool, use_conversation, false,
+          "If true, exercise the Conversation+skip_chat_template code path "
+          "instead of the Session-direct path. Used to validate that the "
+          "iOS-facing Conversation bypass produces the same logits.");
 
 namespace {
 
@@ -118,6 +129,18 @@ absl::Status MainHelper(int argc, char** argv) {
       EngineSettings engine_settings,
       EngineSettings::CreateDefault(std::move(model_assets), backend,
                                     vision_backend));
+  const std::string decode_sig_flag =
+      absl::GetFlag(FLAGS_decode_signature_name);
+  const std::string prefill_filter_flag =
+      absl::GetFlag(FLAGS_prefill_signature_filter);
+  if (!decode_sig_flag.empty()) {
+    engine_settings.GetMutableMainExecutorSettings().SetDecodeSignatureName(
+        decode_sig_flag);
+  }
+  if (!prefill_filter_flag.empty()) {
+    engine_settings.GetMutableMainExecutorSettings().SetPrefillSignatureFilter(
+        prefill_filter_flag);
+  }
 
   // Use the Advanced engine so the SessionAdvanced::GetAuxiliaryOutput hook
   // is wired through. The default ("LiteRT Compiled Model") engine returns
@@ -128,7 +151,26 @@ absl::Status MainHelper(int argc, char** argv) {
                                     std::move(engine_settings)));
 
   // Build SessionConfig with LoRA file + max_output_tokens=1.
+  //
+  // CRITICAL: SetApplyPromptTemplateInSession(false). The classifier head
+  // is exported with pooling over `hidden_states[:, -1, :]` (the LAST input
+  // token's hidden state) and was trained on RAW text — the last token at
+  // training time was the document's final content token (e.g., a period).
+  // If we leave templating on, Session::ApplyPromptTemplates wraps the
+  // text with Gemma's chat template — `<start_of_turn>user\n...
+  // <end_of_turn>\n<start_of_turn>model\n` — and the last token the
+  // classifier sees is the `\n` boundary token. That token carries no
+  // document content, so logits collapse to |<1| and the head produces
+  // a near-flat softmax. Bypassing the session template (and going through
+  // Session directly, not Conversation — which applies its own minijinja
+  // chat template) restores the training-time tokenization and recovers
+  // the head's full discriminative range (|logits| > 4).
   auto session_config = litert::lm::SessionConfig::CreateDefault();
+  session_config.SetApplyPromptTemplateInSession(false);
+  // start_token_id is auto-resolved from the model's LlmMetadata
+  // (`start_token { token_str: "<bos>" }`) by SessionConfig::MaybeUpdateAndValidate
+  // during engine->CreateSession, so the BOS gets prepended on prefill — same
+  // as HF tokenizers with add_special_tokens=True at training time.
   if (!lora_path.empty()) {
     ASSIGN_OR_RETURN(::litert::ScopedFile scoped_file,
                      ::litert::ScopedFile::Open(lora_path));
@@ -142,29 +184,37 @@ absl::Status MainHelper(int argc, char** argv) {
   }
   session_config.SetMaxOutputTokens(1);
 
-  ASSIGN_OR_RETURN(auto conversation_config,
-                   ConversationConfig::Builder()
-                       .SetSessionConfig(session_config)
-                       .Build(*engine));
-  std::unique_ptr<Conversation> conversation;
-  ASSIGN_OR_RETURN(conversation,
-                   Conversation::Create(*engine, conversation_config));
-
-  // Send the input text and wait for completion. With max_output_tokens=1, the
-  // runtime runs prefill + exactly one decode step. The decode step processes
-  // the last input token held as pending after prefill, so the resulting
-  // auxiliary output corresponds to the classifier applied to that token's
-  // hidden state — which is what the SEQ_CLS head was trained on.
   std::cout << "[classify_main] prompt: " << prompt << std::endl;
-  json content_list = json::array();
-  content_list.push_back({{"type", "text"}, {"text", prompt}});
-  RETURN_IF_ERROR(conversation->SendMessageAsync(
-      json::object({{"role", "user"}, {"content", content_list}}),
-      [](absl::StatusOr<Message> /*message*/) {}));
-  RETURN_IF_ERROR(engine->WaitUntilDone(absl::Minutes(5)));
-
-  // Read the classifier_logits auxiliary output.
-  ASSIGN_OR_RETURN(auto logits, conversation->GetAuxiliaryOutput(aux_name));
+  std::vector<float> logits;
+  if (absl::GetFlag(FLAGS_use_conversation)) {
+    // Conversation path with skip_chat_template=true. This is what the iOS
+    // LocalInferenceService classifyText() will go through after we plumb
+    // the flag into the Swift wrapper.
+    ASSIGN_OR_RETURN(auto conversation_config,
+                     ConversationConfig::Builder()
+                         .SetSessionConfig(session_config)
+                         .SetSkipChatTemplate(true)
+                         .Build(*engine));
+    std::unique_ptr<Conversation> conversation;
+    ASSIGN_OR_RETURN(conversation,
+                     Conversation::Create(*engine, conversation_config));
+    json content_list = json::array();
+    content_list.push_back({{"type", "text"}, {"text", prompt}});
+    RETURN_IF_ERROR(conversation->SendMessageAsync(
+        json::object({{"role", "user"}, {"content", content_list}}),
+        [](absl::StatusOr<Message> /*message*/) {}));
+    RETURN_IF_ERROR(engine->WaitUntilDone(absl::Minutes(5)));
+    ASSIGN_OR_RETURN(logits, conversation->GetAuxiliaryOutput(aux_name));
+  } else {
+    // Session-direct path: skip Conversation entirely.
+    ASSIGN_OR_RETURN(auto session, engine->CreateSession(session_config));
+    std::vector<litert::lm::InputData> prefill_inputs;
+    prefill_inputs.emplace_back(litert::lm::InputText(prompt));
+    RETURN_IF_ERROR(session->RunPrefill(prefill_inputs));
+    (void)session->RunDecode();
+    RETURN_IF_ERROR(engine->WaitUntilDone(absl::Minutes(5)));
+    ASSIGN_OR_RETURN(logits, session->GetAuxiliaryOutput(aux_name));
+  }
   std::cout << "[classify_main] " << aux_name << " (" << logits.size()
             << " floats):" << std::endl;
   for (size_t i = 0; i < logits.size(); ++i) {

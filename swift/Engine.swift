@@ -90,6 +90,16 @@ public actor Engine {
     if let cacheDir = engineConfig.cacheDir {
       litert_lm_engine_settings_set_cache_dir(settings, cacheDir)
     }
+    if let decodeSignatureName = engineConfig.decodeSignatureName,
+       !decodeSignatureName.isEmpty {
+      litert_lm_engine_settings_set_decode_signature_name(
+        settings, decodeSignatureName)
+    }
+    if let prefillFilter = engineConfig.prefillSignatureFilter,
+       !prefillFilter.isEmpty {
+      litert_lm_engine_settings_set_prefill_signature_filter(
+        settings, prefillFilter)
+    }
     if let prefill = benchmarkPrefillTokens, let decode = benchmarkDecodeTokens {
       litert_lm_engine_settings_enable_benchmark(settings)
       litert_lm_engine_settings_set_num_prefill_tokens(settings, Int32(prefill))
@@ -205,6 +215,8 @@ public actor Engine {
       cConversationConfig, ExperimentalFlags.enableConversationConstrainedDecoding)
     litert_lm_conversation_config_set_prefill_preface_on_init(
       cConversationConfig, conversationConfig.prefillPrefaceOnInit)
+    litert_lm_conversation_config_set_skip_chat_template(
+      cConversationConfig, conversationConfig.skipChatTemplate)
 
     guard
       let conversationHandle = litert_lm_conversation_create(

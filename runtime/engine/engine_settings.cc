@@ -255,6 +255,32 @@ absl::Status EngineSettings::MaybeUpdateAndValidate(
         }
       }
     }
+    // Auto-add Gemma 4 IT's end-of-turn marker as a stop token when the
+    // model's jinja template uses it. Upstream's metadata.stop_tokens for
+    // these models often only lists <eos> (token id 1); the model emits
+    // `<turn|>` (token id 106 for Gemma 4) to signal end-of-turn but the
+    // runtime keeps decoding past it until maxOutputTokens, polluting the
+    // response with trailing `<turn|>` literals. Detecting the template's
+    // use of these markers and appending them to the stop list shuts
+    // generation off at the right place.
+    if (metadata.has_jinja_prompt_template()) {
+      const std::string& tmpl = metadata.jinja_prompt_template();
+      auto try_add_stop_str = [&](absl::string_view marker) {
+        if (!absl::StrContains(tmpl, marker)) return;
+        auto id = tokenizer->TokenToId(marker);
+        if (!id.ok()) return;
+        // Skip if already listed.
+        for (const auto& existing : metadata.stop_tokens()) {
+          for (int existing_id : existing.token_ids().ids()) {
+            if (existing_id == *id) return;
+          }
+        }
+        auto* added = metadata.add_stop_tokens();
+        added->set_token_str(std::string(marker));
+        added->mutable_token_ids()->mutable_ids()->Add(*id);
+      };
+      try_add_stop_str("<turn|>");
+    }
     if (metadata.start_token().has_token_str()) {
       auto start_token_id =
           tokenizer->TokenToId(metadata.start_token().token_str());

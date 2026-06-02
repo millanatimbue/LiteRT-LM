@@ -257,9 +257,10 @@ class SessionConfig {
   void SetScopedLoraFile(std::shared_ptr<ScopedFile> scoped_lora_file);
 
   // Name of the compiled-model decode signature to invoke for this session.
-  // Defaults to "decode" (the canonical Gemma/LiteRT signature name).
-  // Set to a different name to dispatch to a parallel signature in the same
-  // graph — e.g. a classifier head signature that also takes LoRA inputs.
+  // Empty string ("") means "use whatever the engine was initialized with"
+  // (the engine-level `ExecutorSettings::decode_signature_name_`). Set
+  // explicitly to dispatch a per-session override — e.g. a classifier head
+  // signature parallel to the engine's chat decode signature.
   const std::string& GetDecodeSignatureName() const {
     return decode_signature_name_;
   }
@@ -322,7 +323,11 @@ class SessionConfig {
   // Scoped file for the LoRA weights.
   std::shared_ptr<ScopedFile> scoped_lora_file_;
 
-  std::string decode_signature_name_ = "decode";
+  // Empty by default — see GetDecodeSignatureName() doc. resource_manager
+  // only propagates this to the executor when it's non-empty, so the engine's
+  // own decode_signature_name (set via ExecutorSettings) stays authoritative
+  // for sessions that don't override.
+  std::string decode_signature_name_ = "";
 
   // The maximum number of tokens to generate in a single request. This limits
   // the number of decoding steps for a request, as opposed to
