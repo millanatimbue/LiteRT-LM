@@ -146,6 +146,7 @@ absl::StatusOr<litert::Options> CreateCompilationOptions(
         // This option prevents KVCache handling from being affected by
         // BHWC conversion in NoExternalTensorsMode.
         gpu_compilation_options.AddExternalTensorPattern("kv_cache_");
+        gpu_compilation_options.AddBufferStorageTensorPattern("kv_cache_");
         if (signatures.has_value() &&
             signatures.value()->input_int32_param.has_value()) {
           gpu_compilation_options.AddBufferStorageTensorPattern("kv_cache_");
