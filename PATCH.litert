@@ -1,0 +1,113 @@
+diff --git a/litert/runtime/compiled_model.cc b/litert/runtime/compiled_model.cc
+index 4522eee..a691b48 100644
+--- a/litert/runtime/compiled_model.cc
++++ b/litert/runtime/compiled_model.cc
+@@ -1428,6 +1428,27 @@ Expected<void> LiteRtCompiledModelT::RegisterBuffer(
+ 
+     for (auto& type : supported_types) {
+       if (type == buffer->buffer_type()) {
++        // [BIND-FIX] If this tensor was previously slow-pathed
++        // (kTfLiteCustom), the matching entry in the subgraph's
++        // custom_allocations_ map is now stale. Without removing it, the next
++        // AllocateTensors() will TF_LITE_ENSURE_EQ that the tensor's
++        // allocation_type is still kTfLiteCustom — but we are about to flip it
++        // to kTfLiteNonCpu, which trips the check with "8 != 6". Erase the
++        // stale entry now so the symmetric invariant holds. This matters on
++        // iOS Metal where the same KV-cache tensor can take the slow path on
++        // the first sendMessage of a conversation and the fast path on
++        // subsequent ones.
++        if (tensor->allocation_type == kTfLiteCustom) {
++          if (runner) {
++            if (is_input) {
++              runner->EraseCustomAllocationForInputTensor(tensor_name);
++            } else {
++              runner->EraseCustomAllocationForOutputTensor(tensor_name);
++            }
++          } else {
++            interp_->EraseCustomAllocationForTensor(tensor_index);
++          }
++        }
+         // Register tensor buffer if it can be used by the backend.
+         buffer->Duplicate();
+         LiteRtTensorBufferPtr duplicated_buffer(buffer);
+diff --git a/tflite/core/interpreter.h b/tflite/core/interpreter.h
+index d044263..07f14b6 100644
+--- a/tflite/core/interpreter.h
++++ b/tflite/core/interpreter.h
+@@ -845,6 +845,10 @@ class Interpreter {
+       int tensor_index, const TfLiteCustomAllocation& allocation,
+       int64_t flags = kTfLiteCustomAllocationFlagsNone);
+ 
++  /// [BIND-FIX] Erase a single tensor's custom allocation entry on the primary
++  /// subgraph. No-op if the tensor has no entry.
++  void EraseCustomAllocationForTensor(int tensor_index);
++
+   /// \warning This is an experimental API and subject to change. \n
+   /// \brief Apply InterpreterOptions which tunes behavior of the interpreter.
+   TfLiteStatus ApplyOptions(InterpreterOptions* options);
+diff --git a/tflite/core/interpreter_experimental.cc b/tflite/core/interpreter_experimental.cc
+index 23e90e9..224b47d 100644
+--- a/tflite/core/interpreter_experimental.cc
++++ b/tflite/core/interpreter_experimental.cc
+@@ -37,6 +37,11 @@ TfLiteStatus Interpreter::SetCustomAllocationForTensor(
+                                                          allocation, flags);
+ }
+ 
++// [BIND-FIX] See comment on Subgraph::EraseCustomAllocationForTensor.
++void Interpreter::EraseCustomAllocationForTensor(int tensor_index) {
++  primary_subgraph().EraseCustomAllocationForTensor(tensor_index);
++}
++
+ TfLiteStatus Interpreter::ReleaseNonPersistentMemory() {
+   // TODO(b/138790287): We could do this for all subgraphs whose tensors have
+   // been allocated. However, AllocateTensors() relies on Control Flow ops to
+diff --git a/tflite/core/signature_runner.h b/tflite/core/signature_runner.h
+index 1f77f4d..35bb385 100644
+--- a/tflite/core/signature_runner.h
++++ b/tflite/core/signature_runner.h
+@@ -232,6 +232,24 @@ class SignatureRunner {
+     return kTfLiteOk;
+   }
+ 
++  /// [BIND-FIX] Erase the custom-allocation entry for a single named input,
++  /// without touching other tensors. Returns kTfLiteOk if name resolves (even
++  /// if no entry existed), kTfLiteError if the name is unknown.
++  TfLiteStatus EraseCustomAllocationForInputTensor(const char* input_name) {
++    const auto& it = signature_def_->inputs.find(input_name);
++    if (it == signature_def_->inputs.end()) return kTfLiteError;
++    subgraph_->EraseCustomAllocationForTensor(it->second);
++    return kTfLiteOk;
++  }
++
++  /// [BIND-FIX] Mirror of the above for outputs.
++  TfLiteStatus EraseCustomAllocationForOutputTensor(const char* output_name) {
++    const auto& it = signature_def_->outputs.find(output_name);
++    if (it == signature_def_->outputs.end()) return kTfLiteError;
++    subgraph_->EraseCustomAllocationForTensor(it->second);
++    return kTfLiteOk;
++  }
++
+   /// \brief Set if buffer handle output is allowed.
+   ///
+   /// When using hardware delegation, Interpreter will make the data of output
+diff --git a/tflite/core/subgraph.h b/tflite/core/subgraph.h
+index 5165e80..c4d9b17 100644
+--- a/tflite/core/subgraph.h
++++ b/tflite/core/subgraph.h
+@@ -455,6 +455,16 @@ class Subgraph {
+   // User should call this before resizing input tensors.
+   void ClearCustomAllocations() { custom_allocations_.clear(); }
+ 
++  // [BIND-FIX] Erase a single tensor's custom allocation entry without
++  // disturbing the others. Used by LiteRtCompiledModelT::RegisterBuffer when a
++  // tensor that was previously slow-pathed (kTfLiteCustom) is being upgraded to
++  // the accelerator fast path (kTfLiteNonCpu). Without this, the stale entry in
++  // custom_allocations_ trips a TF_LITE_ENSURE_EQ check on the next
++  // AllocateTensors() call. No-op if the tensor has no entry.
++  void EraseCustomAllocationForTensor(int tensor_index) {
++    custom_allocations_.erase(tensor_index);
++  }
++
+   void SetName(const char* name);
+   const std::string& GetName() const;
+ 

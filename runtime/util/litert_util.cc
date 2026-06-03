@@ -45,19 +45,42 @@ absl::StatusOr<Environment&> GetEnvironment(EngineSettings& engine_settings,
       engine_settings.GetMainExecutorSettings();
   Backend backend = main_executor_settings.GetBackend();
 
+  // [ENV-ISOLATION] Two engines that load the same model but target different
+  // decode signatures (e.g. a chat engine on decode_chat and a classifier
+  // engine on decode_classifier in a dual-sig bundle) used to share a single
+  // cached Environment because the cache was keyed only by Backend. With a
+  // shared Metal device + LiteRT environment, classifier inference (LoRA-
+  // bound) corrupted the chat engine's KV state across calls — chat output
+  // collapsed to "a vague, vague, vague description." after each classifier
+  // run. Including the decode signature in the cache key gives each engine
+  // its own Environment instance while preserving caching for the common
+  // case (two engines with identical settings hit the same entry).
+  // b/454383477 (referenced in the header) requires we keep ONE Environment
+  // per logical (backend × signature) — not one per app — so this key bump
+  // doesn't reintroduce the multi-instance hazard the original singleton
+  // guards against.
+  using CacheKey = std::pair<Backend, std::string>;
+  struct CacheKeyHash {
+    std::size_t operator()(const CacheKey& k) const {
+      return std::hash<int>()(static_cast<int>(k.first)) ^
+             (std::hash<std::string>()(k.second) << 1);
+    }
+  };
+  CacheKey cache_key = {backend, main_executor_settings.GetDecodeSignatureName()};
+
   struct CachedEnvironment {
     Environment env;
     std::unique_ptr<MagicNumberConfigsHelper> helper;
   };
 
   static absl::Mutex environments_mu(absl::kConstInit);
-  static absl::NoDestructor<
-      std::unordered_map<Backend, absl::StatusOr<CachedEnvironment>>>
+  static absl::NoDestructor<std::unordered_map<
+      CacheKey, absl::StatusOr<CachedEnvironment>, CacheKeyHash>>
       kEnvironments;
 
   absl::MutexLock lock(&environments_mu);
 
-  auto it = kEnvironments->find(backend);
+  auto it = kEnvironments->find(cache_key);
   if (it == kEnvironments->end()) {
     auto env_res = [&]() -> absl::StatusOr<CachedEnvironment> {
       std::vector<EnvironmentOptions::Option> env_options;
@@ -129,7 +152,7 @@ absl::StatusOr<Environment&> GetEnvironment(EngineSettings& engine_settings,
           auto env, Environment::Create(EnvironmentOptions(env_options)));
       return CachedEnvironment{std::move(env), std::move(helper)};
     }();
-    it = kEnvironments->emplace(backend, std::move(env_res)).first;
+    it = kEnvironments->emplace(cache_key, std::move(env_res)).first;
   }
 
   if (!it->second.ok()) {

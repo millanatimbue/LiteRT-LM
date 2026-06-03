@@ -732,10 +732,56 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::PrefillInternal(
                                   async);
 }
 
+// [KV-HASH] Fingerprint helper: FNV-1a over the first 256 bytes of each KV
+// input buffer (cheap — ~96 * 256 = 24KB of CPU readback), keyed by buffer
+// name so reordering doesn't change the hash. Used as a diagnostic to test
+// whether KV cache contents are mutated between calls — if the hash before
+// chat decode differs from a logged hash captured pre-classifier-run, the
+// chat engine's KV state was modified by the cross-engine leak.
+static std::string HashKVBuffersForLog(
+    absl::flat_hash_map<absl::string_view, TensorBuffer>* buffers) {
+  if (buffers == nullptr || buffers->empty()) return "empty";
+  std::vector<absl::string_view> names;
+  names.reserve(buffers->size());
+  for (const auto& kv : *buffers) names.push_back(kv.first);
+  std::sort(names.begin(), names.end());
+  uint64_t total = 14695981039346656037ULL;  // FNV-1a 64-bit offset basis
+  size_t total_bytes = 0;
+  for (const auto& name : names) {
+    // Mix in name so two buffers with identical bytes but different names
+    // produce different fingerprints.
+    for (char c : name) {
+      total ^= static_cast<uint8_t>(c);
+      total *= 1099511628211ULL;
+    }
+    auto it = buffers->find(name);
+    if (it == buffers->end()) continue;
+    auto lock = ::litert::TensorBufferScopedLock::Create(
+        const_cast<TensorBuffer&>(it->second), TensorBuffer::LockMode::kRead);
+    if (!lock) continue;
+    const uint8_t* bytes = static_cast<const uint8_t*>(lock->second);
+    auto sz_or = it->second.PackedSize();
+    size_t sz = sz_or.HasValue() ? sz_or.Value() : 0;
+    size_t sample = std::min<size_t>(sz, 256);
+    for (size_t i = 0; i < sample; ++i) {
+      total ^= bytes[i];
+      total *= 1099511628211ULL;
+    }
+    total_bytes += sample;
+  }
+  return absl::StrFormat("%016x@%zub", total, total_bytes);
+}
+
 absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
     absl::string_view prefill_signature,
     absl::flat_hash_map<absl::string_view, TensorBuffer>& prefill_input_buffers,
     bool async) {
+  // [KV-HASH] State at prefill entry — captures the KV the conversation
+  // brings in (either base's prefilled state on first prefill of a clone,
+  // or accumulated state on subsequent prefills).
+  ABSL_LOG(ERROR) << "[KV-HASH] entry sig=\"" << prefill_signature
+                  << "\" stage=prefill kv_in="
+                  << HashKVBuffersForLog(input_kv_cache_buffers_);
   absl::flat_hash_map<absl::string_view, TensorBuffer> input_buffers;
   for (const auto& [input_name, input_buffer] : prefill_input_buffers) {
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
@@ -998,6 +1044,11 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::DecodeInternal(
 
 absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
     TensorBuffer* output_logits, absl::string_view signature_name) {
+  // [KV-HASH] State at decode entry — what the decode step is about to read
+  // from the KV cache (after prefill has populated user-message K/V).
+  ABSL_LOG(ERROR) << "[KV-HASH] entry sig=\"" << signature_name
+                  << "\" stage=decode kv_in="
+                  << HashKVBuffersForLog(input_kv_cache_buffers_);
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers;
   for (const auto& [input_name, input_buffer] : decode_input_buffers_) {
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());

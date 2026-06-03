@@ -109,6 +109,19 @@ ABSL_FLAG(std::string, prefill_signature_filter, "",
           "If non-empty, only consider prefill signatures whose name "
           "contains this substring (e.g. \"_chat\" / \"_classifier\"). Pairs "
           "with --decode_signature_name for multi-variant models.");
+ABSL_FLAG(std::string, classifier_decode_signature_name, "",
+          "When set together with --double_engine, the SECOND engine is "
+          "pinned to this decode signature and the classifier path is "
+          "routed to it. Mirrors the iOS dual-engine architecture (chat "
+          "on engine1, classifier on engine2). When empty, both engines "
+          "share --decode_signature_name (legacy behavior).");
+ABSL_FLAG(std::string, classifier_prefill_signature_filter, "",
+          "Companion to --classifier_decode_signature_name for the second "
+          "engine's prefill filter (e.g. \"_classifier\").");
+ABSL_FLAG(std::string, classifier_backend, "",
+          "Backend for the classifier engine (cpu or gpu). Empty = use the "
+          "global --backend. Used to test Mac with CPU classifier (avoids "
+          "WebGPU buffer-alignment errors that silently zero LoRA output).");
 ABSL_FLAG(std::string, system_message,
           "You are a moderation classifier. For each post, output exactly "
           "one row of pipe-delimited verdicts (yes or no), one per "
@@ -292,9 +305,11 @@ absl::StatusOr<std::vector<float>> RunClassifierOnce(
 
   ASSIGN_OR_RETURN(auto cc, ConversationConfig::Builder()
                                 .SetSessionConfig(session_config)
+                                .SetSkipChatTemplate(true)
                                 .Build(engine));
   std::cout << "[e2e-dbg] config built. cc.GetSessionConfig.GetScopedLoraFile: "
-            << (cc.GetSessionConfig().GetScopedLoraFile() != nullptr) << "\n"
+            << (cc.GetSessionConfig().GetScopedLoraFile() != nullptr)
+            << " skip_chat_template=" << cc.skip_chat_template() << "\n"
             << std::flush;
   ASSIGN_OR_RETURN(auto convo, Conversation::Create(engine, cc));
   std::cout << "[e2e-dbg] Conversation::Create returned\n" << std::flush;
@@ -339,34 +354,66 @@ absl::Status MainHelper(int argc, char** argv) {
   const std::string decode_sig = absl::GetFlag(FLAGS_decode_signature_name);
   const std::string prefill_filter =
       absl::GetFlag(FLAGS_prefill_signature_filter);
-  auto build_engine = [&]() -> absl::StatusOr<std::unique_ptr<litert::lm::Engine>> {
+  const std::string classifier_decode_sig =
+      absl::GetFlag(FLAGS_classifier_decode_signature_name);
+  const std::string classifier_prefill_filter =
+      absl::GetFlag(FLAGS_classifier_prefill_signature_filter);
+  auto build_engine_with_sig = [&](absl::string_view ds, absl::string_view pf,
+                                    Backend be)
+      -> absl::StatusOr<std::unique_ptr<litert::lm::Engine>> {
     ASSIGN_OR_RETURN(ModelAssets assets, ModelAssets::Create(model_path));
     ASSIGN_OR_RETURN(EngineSettings s, EngineSettings::CreateDefault(
-                                          std::move(assets), backend));
-    if (!decode_sig.empty()) {
-      s.GetMutableMainExecutorSettings().SetDecodeSignatureName(decode_sig);
+                                          std::move(assets), be));
+    if (!ds.empty()) {
+      s.GetMutableMainExecutorSettings().SetDecodeSignatureName(std::string(ds));
     }
-    if (!prefill_filter.empty()) {
+    if (!pf.empty()) {
       s.GetMutableMainExecutorSettings().SetPrefillSignatureFilter(
-          prefill_filter);
+          std::string(pf));
     }
     return litert::lm::EngineFactory::Create(
         litert::lm::EngineFactory::EngineType::kAdvancedLiteRTCompiledModel,
         std::move(s));
+  };
+  auto build_engine = [&]() {
+    return build_engine_with_sig(decode_sig, prefill_filter, backend);
   };
 
   PrintRss("before engine 1");
   ASSIGN_OR_RETURN(auto engine, build_engine());
   PrintRss("after engine 1");
 
-  // Second engine: pointed at the same model_path. If LiteRT's mmap really
-  // shares file-backed physical pages, RSS should grow by per-engine state
-  // only (~tens of MiB) — not by another model's worth (~3.9 GiB).
+  // Second engine. When --classifier_decode_signature_name is set, this
+  // engine is pinned to that signature and the classifier path routes
+  // through it (mirroring the iOS dual-engine setup). Otherwise it shares
+  // the same signature as engine1 (legacy behavior — was only used for
+  // RSS measurement).
   std::unique_ptr<litert::lm::Engine> engine2;
   if (absl::GetFlag(FLAGS_double_engine)) {
-    ASSIGN_OR_RETURN(engine2, build_engine());
+    Backend cls_backend = backend;
+    const std::string cls_backend_flag =
+        absl::GetFlag(FLAGS_classifier_backend);
+    if (!cls_backend_flag.empty()) {
+      ASSIGN_OR_RETURN(cls_backend,
+                       litert::lm::GetBackendFromString(cls_backend_flag));
+    }
+    if (!classifier_decode_sig.empty()) {
+      ASSIGN_OR_RETURN(engine2,
+          build_engine_with_sig(classifier_decode_sig,
+                                classifier_prefill_filter, cls_backend));
+      std::cout << "[e2e] engine2 pinned to decode_sig=\""
+                << classifier_decode_sig << "\" prefill_filter=\""
+                << classifier_prefill_filter << "\" backend="
+                << cls_backend_flag << "\n";
+    } else {
+      ASSIGN_OR_RETURN(engine2, build_engine());
+    }
     PrintRss("after engine 2");
   }
+  // Pick the engine the classifier path will use: engine2 if it was pinned
+  // to a classifier signature, otherwise fall back to engine1 (legacy).
+  litert::lm::Engine* classifier_engine =
+      (engine2 && !classifier_decode_sig.empty()) ? engine2.get() : engine.get();
 
   const std::string mode = absl::GetFlag(FLAGS_mode);
   std::cout << "[e2e] backend=" << backend_str << " iterations=" << iterations
@@ -538,7 +585,7 @@ absl::Status MainHelper(int argc, char** argv) {
     int failures = 0;
     for (int i = 0; i < iterations; ++i) {
       const absl::string_view prompt = kPrompts[i % kNumPrompts];
-      auto logits = RunClassifierOnce(*engine, lora_path, prompt);
+      auto logits = RunClassifierOnce(*classifier_engine, lora_path, prompt);
       if (!logits.ok()) {
         std::cout << "[e2e] iter=" << i << " classifier FAILED: "
                   << logits.status() << "\n";
@@ -579,7 +626,7 @@ absl::Status MainHelper(int argc, char** argv) {
     if (!chat_sane) ++failures;
 
     // Classifier path.
-    auto logits = RunClassifierOnce(*engine, lora_path, prompt);
+    auto logits = RunClassifierOnce(*classifier_engine, lora_path, prompt);
     if (!logits.ok()) {
       std::cout << "[e2e] iter=" << i
                 << " phase=interleave classifier FAILED: " << logits.status()
@@ -624,7 +671,7 @@ absl::Status MainHelper(int argc, char** argv) {
         ++failures;
       }
     } else {
-      auto logits = RunClassifierOnce(*engine, lora_path, prompt);
+      auto logits = RunClassifierOnce(*classifier_engine, lora_path, prompt);
       if (!logits.ok()) {
         std::cout << "[e2e] iter=" << i
                   << " phase=rapid classifier FAILED: " << logits.status()

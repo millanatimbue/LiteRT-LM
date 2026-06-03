@@ -374,6 +374,14 @@ http_archive(
 
 http_archive(
     name = "litert",
+    # [BIND-FIX] Symmetric cleanup of custom_allocations_ when the
+    # compiled-model fast path upgrades a tensor from kTfLiteCustom to
+    # kTfLiteNonCpu. Without this, KV-cache tensors on iOS Metal trip
+    # subgraph.cc's TF_LITE_ENSURE_EQ with "(8 != 6)" mid-conversation
+    # and the runtime errors out the call, forcing an engine rebuild and
+    # killing prefix-cache reuse. See PATCH.litert for the full diff.
+    patches = ["@//:PATCH.litert"],
+    patch_args = ["-p1"],
     patch_cmds = [
         # Replace @//third_party with @litert//third_party in files under third_party/.
         "sed -i -e 's|\"@//third_party/|\"@litert//third_party/|g' third_party/*/*",
