@@ -38,8 +38,8 @@ let package = Package(
     // see the recipe in commit 58977bad.
     .binaryTarget(
       name: "CLiteRTLM",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/CLiteRTLM.xcframework.zip",
-      checksum: "0e7b214ea1a6e925a199e8d4724be7251a3ef7a8634f647be310a2f3ce51ee14"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-bouncer-v4-lora-state-fix/CLiteRTLM.xcframework.zip",
+      checksum: "73874afbf91ab807d3f1d1f18765e896b3eaa7fa5ec0b12981817cee60a8b6be"
     ),
     // 1a. GPU / accelerator dylibs — shipped as library-style xcframeworks so
     // they land at the top of Bouncer.app/Frameworks/ (not nested inside
@@ -49,26 +49,26 @@ let package = Package(
     // -library` against /prebuilt/{ios_arm64,ios_sim_arm64}/lib*.dylib.
     .binaryTarget(
       name: "libGemmaModelConstraintProvider",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/libGemmaModelConstraintProvider.xcframework.zip",
-      checksum: "6f625e13942e21cf230f39e0f1be018a35b8dd887348f3e51d307017954c2a95"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-bouncer-v4-lora-state-fix/libGemmaModelConstraintProvider.xcframework.zip",
+      checksum: "7ebf8ad46861b745ba6185f5f09d7876173d9b43402293e8aec4d33deed25c9d"
     ),
     .binaryTarget(
       name: "libLiteRt",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/libLiteRt.xcframework.zip",
-      checksum: "47296b349bc0da07d65da844b14587be7007be52d46d514996a8f9b499c79830"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-bouncer-v4-lora-state-fix/libLiteRt.xcframework.zip",
+      checksum: "3805decbf675ae0f1cac2153dc2a454ba7dc858f1abc8c1f3bcddccb25114e43"
     ),
     .binaryTarget(
       name: "libLiteRtMetalAccelerator",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/libLiteRtMetalAccelerator.xcframework.zip",
-      checksum: "6d5f653f7cc00b979faa576f7caec29b2be0952c30703f8080d5e9b285db8053"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-bouncer-v4-lora-state-fix/libLiteRtMetalAccelerator.xcframework.zip",
+      checksum: "5937268057b7699bf46afbbe4d85bef64763112118c75a7b2a0e1bbee470fb56"
     ),
     // libLiteRtTopKMetalSampler ships device-only (no simulator slice exists
     // in upstream's prebuilts). The C++ code is expected to dlopen it
     // conditionally on device; sim builds run without it.
     .binaryTarget(
       name: "libLiteRtTopKMetalSampler",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/prefix-cache-v1/libLiteRtTopKMetalSampler.xcframework.zip",
-      checksum: "21574ca11b6a837bb13d7bb5dd016eb6b21134cf429d2457cbdb045bf855a0cc"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-bouncer-v4-lora-state-fix/libLiteRtTopKMetalSampler.xcframework.zip",
+      checksum: "1216719a45167c7d68b924b891bd7bf77a94a4856ef107142855e26cec20b803"
     ),
     // 2. The Swift Wrapper Target
     .target(
