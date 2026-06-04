@@ -39,7 +39,7 @@ let package = Package(
     .binaryTarget(
       name: "CLiteRTLM",
       url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/bench-timing-on-6186155/CLiteRTLM.xcframework.zip",
-      checksum: "b810d0ee15c35a3b082f6252798f0f84e24f2b7992bf4f7c026dc57e7ffafce3"
+      checksum: "cbea9dec2a3cb336f125266ff828805361eae3c339635d58e54b207fba25ab4f"
     ),
     // 1a. GPU / accelerator dylibs — shipped as library-style xcframeworks so
     // they land at the top of Bouncer.app/Frameworks/ (not nested inside
