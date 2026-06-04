@@ -208,6 +208,15 @@ public struct ConversationConfig {
   /// flows — those need the chat template Gemma was trained against.
   public let skipChatTemplate: Bool
 
+  /// Optional override for the compiled-model decode signature to dispatch
+  /// against this conversation. `nil` falls back to the engine-level default
+  /// (set via `EngineConfig.decodeSignatureName` or "decode" if unset). Used
+  /// for dual-signature bundles where one engine exposes both `decode_chat`
+  /// and `decode_classifier`: chat conversations pass `"decode_chat"` and
+  /// classifier conversations pass `"decode_classifier"` so the runtime
+  /// dispatches the right signature per call without rebuilding the engine.
+  public let decodeSignatureName: String?
+
   /// - Parameters:
   ///   - systemMessage: The system message to be used in the conversation.
   ///   - initialMessages: The initial messages to populate the conversation history.
@@ -229,7 +238,8 @@ public struct ConversationConfig {
     prefillPrefaceOnInit: Bool = false,
     scopedLoraFile: URL? = nil,
     maxOutputTokens: Int? = nil,
-    skipChatTemplate: Bool = false
+    skipChatTemplate: Bool = false,
+    decodeSignatureName: String? = nil
   ) {
     self.systemMessage = systemMessage.map { msg in
       msg.role == .system
@@ -242,5 +252,6 @@ public struct ConversationConfig {
     self.scopedLoraFile = scopedLoraFile
     self.maxOutputTokens = maxOutputTokens
     self.skipChatTemplate = skipChatTemplate
+    self.decodeSignatureName = decodeSignatureName
   }
 }

@@ -70,8 +70,16 @@ struct ModelSignatures {
   std::optional<std::string> input_per_layer_embeddings;
   // Input int32 param signature name. For both prefill and decode.
   std::optional<std::string> input_int32_param;
-  // Output logits signature name. Necessary for decode.
+  // Output logits signature name. Necessary for chat-style decode (sampler
+  // reads from this). Empty when the decode signature is classifier-only
+  // (in which case `output_classifier_logits` is set instead).
   std::string output_logits;
+  // Output classifier-logits signature name. Optional. Set when the decode
+  // signature exposes a `classifier_logits` output (dual-signature bundles
+  // where the classifier head replaces lm_head for AI-text detection). Read
+  // via `Conversation.getAuxiliaryOutput("classifier_logits")` on the Swift
+  // side.
+  std::optional<std::string> output_classifier_logits;
 };
 
 // Get the corresponding ModelSignatures struct for the given model using

@@ -155,6 +155,18 @@ LITERT_LM_C_API_EXPORT
 bool litert_lm_session_config_set_scoped_lora_file(
     LiteRtLmSessionConfig* config, const char* path);
 
+// Set the compiled-model decode signature name to dispatch for this session
+// (overrides the engine-level default set via
+// `litert_lm_engine_settings_set_decode_signature_name`). Pass NULL or empty
+// string to clear the override and fall back to the engine default. Used for
+// dual-signature bundles to dispatch chat decodes against `decode_chat` and
+// classify decodes against `decode_classifier` from a single engine.
+// @param config The config to modify.
+// @param name UTF-8 C-string with the exact signature name in the bundle.
+LITERT_LM_C_API_EXPORT
+void litert_lm_session_config_set_decode_signature_name(
+    LiteRtLmSessionConfig* config, const char* name);
+
 // Destroys a LiteRT LM Session Config.
 // @param config The config to destroy.
 LITERT_LM_C_API_EXPORT

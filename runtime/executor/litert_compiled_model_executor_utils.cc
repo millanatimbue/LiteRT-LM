@@ -83,6 +83,11 @@ constexpr std::array<absl::string_view, 1> kInputInt32ParamNames = {
     "param_tensor"};
 // Possible output logits names:
 constexpr std::array<absl::string_view, 1> kOutputLogitsNames = {"logits"};
+// Possible output classifier-logits names. Bouncer dual-signature bundles
+// emit this on the `decode_classifier` variant (no lm_head projection — the
+// AI-text head reads hidden states directly).
+constexpr std::array<absl::string_view, 1> kOutputClassifierLogitsNames = {
+    "classifier_logits"};
 
 absl::StatusOr<std::unique_ptr<ModelResources>>
 BuildModelResourcesFromTaskFormat(const ModelAssets& model_assets) {
@@ -161,6 +166,10 @@ absl::StatusOr<ModelSignatures> GetModelSignaturesFromInputOutputNames(
       model_signatures.output_logits = std::string(output_name);
       continue;
     }
+    if (absl::c_linear_search(kOutputClassifierLogitsNames, output_name)) {
+      model_signatures.output_classifier_logits = std::string(output_name);
+      continue;
+    }
   }
 
   if (strict) {
@@ -171,9 +180,15 @@ absl::StatusOr<ModelSignatures> GetModelSignaturesFromInputOutputNames(
     RET_CHECK(!model_signatures.input_positions.empty())
             .SetCode(absl::StatusCode::kFailedPrecondition)
         << "Input positions not found.";
-    RET_CHECK(!model_signatures.output_logits.empty())
+    // The decode signature must expose either `logits` (chat / generation) or
+    // `classifier_logits` (classifier-only signature, e.g. dual-sig bundle's
+    // `decode_classifier` where lm_head is dropped to skip the vocab=262144
+    // projection). Both missing means the executor has nothing to read.
+    RET_CHECK(!model_signatures.output_logits.empty() ||
+              model_signatures.output_classifier_logits.has_value())
             .SetCode(absl::StatusCode::kFailedPrecondition)
-        << "Output logits not found.";
+        << "Output logits not found (neither `logits` nor "
+           "`classifier_logits` present in decode signature).";
   }
   return model_signatures;
 }

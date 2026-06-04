@@ -304,6 +304,14 @@ bool litert_lm_session_config_set_scoped_lora_file(
   return true;
 }
 
+void litert_lm_session_config_set_decode_signature_name(
+    LiteRtLmSessionConfig* config, const char* name) {
+  if (!config || !config->config) {
+    return;
+  }
+  config->config->SetDecodeSignatureName(name == nullptr ? "" : name);
+}
+
 void litert_lm_session_config_set_sampler_params(
     LiteRtLmSessionConfig* config,
     const LiteRtLmSamplerParams* sampler_params) {
