@@ -196,13 +196,11 @@ public actor Engine {
       }
     }
 
-    // ConversationConfig.decodeSignatureName is currently ignored — the C-API
-    // function `litert_lm_session_config_set_decode_signature_name` is in our
-    // source tree (c/engine.{h,cc}) but the iOS prebuilt
-    // CLiteRTLM.xcframework predates it. Until the xcframework is rebuilt,
-    // dual-signature dispatch is done at the engine level (one Engine per
-    // signature variant). The field is kept on ConversationConfig so callers
-    // can opt in once the xcframework is updated.
+    if let sigName = conversationConfig.decodeSignatureName, !sigName.isEmpty {
+      sigName.withCString { cName in
+        litert_lm_session_config_set_decode_signature_name(cSessionConfig, cName)
+      }
+    }
 
     guard let cConversationConfig = litert_lm_conversation_config_create() else {
       throw LiteRTLMError.engine(.failedToCreateConversationConfig)

@@ -339,7 +339,9 @@ class DecodeOneStep {
       if (benchmark_info_.has_value()) {
         RETURN_IF_ERROR(benchmark_info_->TimeMarkDelta("executor_decode"));
       }
+      ABSL_LOG(ERROR) << "[TIMING] tag=decodelogits_start";
       ASSIGN_OR_RETURN(auto output_logits, executor_.DecodeLogits(inputs));
+      ABSL_LOG(ERROR) << "[TIMING] tag=decodelogits_done";
       if (benchmark_info_.has_value()) {
         RETURN_IF_ERROR(benchmark_info_->TimeMarkDelta("executor_decode"));
       }
@@ -353,8 +355,10 @@ class DecodeOneStep {
       if (benchmark_info_.has_value()) {
         RETURN_IF_ERROR(benchmark_info_->TimeMarkDelta("sampling"));
       }
+      ABSL_LOG(ERROR) << "[TIMING] tag=sample_start";
       RETURN_IF_ERROR(sampler_.value()->SampleToIdAndScoreBuffer(
           output_logits, decoded_ids.value(), &scores_tensor_));
+      ABSL_LOG(ERROR) << "[TIMING] tag=sample_done";
       if (benchmark_info_.has_value()) {
         RETURN_IF_ERROR(benchmark_info_->TimeMarkDelta("sampling"));
       }

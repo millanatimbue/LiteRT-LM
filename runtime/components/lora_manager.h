@@ -96,6 +96,14 @@ class LoraManager {
   GetLoRABuffersOrZero(absl::string_view signature,
                        std::optional<uint32_t> context_lora_id);
 
+  // [METAL-RESET] Drop the cached null-LoRA buffers so the next
+  // GetLoRABuffersOrZero(lora_id=None) call allocates fresh underlying
+  // tensor buffers (and thus fresh MTLBuffer pointers on Metal). Used by
+  // the LLM executor to bust the Metal accelerator's pipeline-state cache
+  // when transitioning between LoRA-active (classifier) and LoRA-inactive
+  // (chat) calls.
+  void ResetNullLora() { null_lora_.reset(); }
+
  private:
   explicit LoraManager(const litert::CompiledModel& compiled_model,
                        absl::string_view decode_signature_name);

@@ -464,6 +464,7 @@ absl::Status Conversation::SendMessageAsync(
     const Message& message,
     absl::AnyInvocable<void(absl::StatusOr<Message>)> user_callback,
     OptionalArgs optional_args) {
+  ABSL_LOG(ERROR) << "[TIMING] tag=send_entry";
   std::string single_turn_text;
   if (config_.skip_chat_template()) {
     // Raw-text path for classifier-head sessions — see ConversationConfig::
@@ -511,11 +512,13 @@ absl::Status Conversation::SendMessageAsync(
     checkpoint_message_index_ = history_.size() - 1;
   }
 
+  ABSL_LOG(ERROR) << "[TIMING] tag=tokenize_start";
   ASSIGN_OR_RETURN(
       auto session_inputs,
       model_data_processor_->ToInputDataVector(
           single_turn_text, nlohmann::ordered_json::array({message}),
           optional_args.args.value_or(std::monostate())));
+  ABSL_LOG(ERROR) << "[TIMING] tag=tokenize_done";
 
   if (is_appending_message_) {
     ASSIGN_OR_RETURN(
@@ -576,12 +579,14 @@ absl::Status Conversation::SendMessageAsync(
                       internal_callback, decode_config,
                       optional_args =
                           std::move(optional_args)]() -> absl::Status {
+    ABSL_LOG(ERROR) << "[TIMING] tag=prefill_scheduling";
     ASSIGN_OR_RETURN(
         auto prefill_task_controller,
         session_->RunPrefillAsync(
             session_inputs, [this, callback = internal_callback, decode_config,
                              task_group_id = optional_args.task_group_id](
                                 absl::StatusOr<Responses> responses) mutable {
+              ABSL_LOG(ERROR) << "[TIMING] tag=prefill_cb_entry";
               // First, check if prefill returned an error. Ignore errors
               // caused by empty input, as this is a valid case for triggering
               // decode only.
@@ -599,13 +604,17 @@ absl::Status Conversation::SendMessageAsync(
                 // Scenario 2: Prefill was skipped due to empty input, or
                 // prefill completed successfully. In either case, we can now
                 // start the decode process.
+                ABSL_LOG(ERROR) << "[TIMING] tag=prefill_cb_done";
 
                 // Run decode.
                 auto decode_task_controller = session_->RunDecodeAsync(
                     [callback](absl::StatusOr<Responses> responses) {
+                      ABSL_LOG(ERROR) << "[TIMING] tag=decode_cb_done";
                       (*callback)(responses);
+                      ABSL_LOG(ERROR) << "[TIMING] tag=decode_cb_returned";
                     },
                     decode_config);
+                ABSL_LOG(ERROR) << "[TIMING] tag=decode_scheduled";
                 // If RunDecodeAsync returns a task controller, it means the
                 // decode task was scheduled successfully. Add the controller
                 // to our map if a task_group_id was provided, so it can be

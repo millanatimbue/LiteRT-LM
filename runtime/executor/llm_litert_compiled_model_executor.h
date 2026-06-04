@@ -351,6 +351,15 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   mutable std::unique_ptr<LoraManager> lora_manager_;
   std::string decode_signature_name_ = "decode";
 
+  // [METAL-RESET] Last lora_id observed per signature. When the next call
+  // on a signature uses a different lora_id, we call
+  // MarkSignatureNeedsAllocationByKey to force re-Prepare of the assigned
+  // delegate kernel — resets Metal pipeline state that the accelerator
+  // caches from the first observed LoRA configuration. Sentinel value
+  // {false, 0} means "no prior call", anything else means "prior lora_id".
+  absl::flat_hash_map<std::string, std::optional<uint32_t>>
+      last_lora_id_per_signature_;
+
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers_;
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_output_buffers_;
   // KV cache double buffers because some GPU backends can't allocate one buffer

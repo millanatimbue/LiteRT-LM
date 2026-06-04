@@ -495,11 +495,14 @@ absl::StatusOr<int> SessionAdvanced::GetCurrentStep() const {
 
 absl::StatusOr<std::vector<float>> SessionAdvanced::GetAuxiliaryOutput(
     absl::string_view name) {
+  ABSL_LOG(ERROR) << "[TIMING] tag=aux_read_start name=" << name;
   auto execution_manager_lock = execution_manager_.lock();
   if (execution_manager_lock == nullptr) {
     return absl::FailedPreconditionError("Execution manager is not available.");
   }
-  return execution_manager_lock->GetAuxiliaryOutput(*session_info_, name);
+  auto result = execution_manager_lock->GetAuxiliaryOutput(*session_info_, name);
+  ABSL_LOG(ERROR) << "[TIMING] tag=aux_read_done";
+  return result;
 }
 
 }  // namespace litert::lm

@@ -37,6 +37,9 @@
 #include "absl/types/span.h"  // from @com_google_absl
 #include "litert/cc/litert_common.h"  // from @litert
 #include "litert/cc/litert_compiled_model.h"  // from @litert
+// [METAL-RESET] Need impl type to call MarkSignatureNeedsAllocationByKey
+// directly. Friend access on CompiledModel + Get() gives us the C handle.
+#include "litert/runtime/compiled_model.h"  // from @litert
 #include "litert/cc/litert_element_type.h"  // from @litert
 #include "litert/cc/litert_environment.h"  // from @litert
 #include "litert/cc/litert_expected.h"  // from @litert
@@ -808,10 +811,73 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
   // adapter from leaking into a session that didn't scope one.
   const std::optional<uint32_t> prefill_lora_id =
       llm_context_->processed_context().lora_id();
+  // [METAL-RESET] See identical block in BindTensorsAndRunDecode for
+  // rationale: force delegate re-Prepare on lora_id transitions to clear
+  // cached Metal pipeline state.
+  {
+    std::string sig_key(prefill_signature);
+    auto it = last_lora_id_per_signature_.find(sig_key);
+    const bool has_prior = (it != last_lora_id_per_signature_.end());
+    const bool changed = has_prior && (it->second != prefill_lora_id);
+    if (changed) {
+      auto* impl = reinterpret_cast<LiteRtCompiledModelT*>(compiled_model_->Get());
+      auto mark = impl->MarkSignatureNeedsAllocationByKey(prefill_signature);
+      bool rotated_null_lora = false;
+      if (lora_manager_ != nullptr && !prefill_lora_id.has_value()) {
+        lora_manager_->ResetNullLora();
+        rotated_null_lora = true;
+      }
+      ABSL_LOG(ERROR) << "[METAL-RESET] prefill sig=\"" << prefill_signature
+                      << "\" lora_id transition "
+                      << (it->second.has_value() ? absl::StrCat(*it->second)
+                                                 : std::string("none"))
+                      << " -> "
+                      << (prefill_lora_id.has_value()
+                              ? absl::StrCat(*prefill_lora_id)
+                              : std::string("none"))
+                      << " mark_ok=" << mark.HasValue()
+                      << " null_lora_rotated=" << rotated_null_lora;
+    }
+    last_lora_id_per_signature_[sig_key] = prefill_lora_id;
+  }
   if (lora_manager_ != nullptr) {
     ASSIGN_OR_RETURN(auto lora_buffers,
                      lora_manager_->GetLoRABuffersOrZero(prefill_signature,
                                                          prefill_lora_id));
+    {
+      std::string lora_id_str = prefill_lora_id.has_value()
+          ? absl::StrCat(*prefill_lora_id) : "none";
+      uint64_t total = 14695981039346656037ULL;
+      size_t total_bytes = 0;
+      bool any_nonzero = false;
+      std::vector<absl::string_view> names;
+      names.reserve(lora_buffers.size());
+      for (const auto& kv : lora_buffers) names.push_back(kv.first);
+      std::sort(names.begin(), names.end());
+      for (const auto& nm : names) {
+        auto it = lora_buffers.find(nm);
+        if (it == lora_buffers.end()) continue;
+        auto lock = ::litert::TensorBufferScopedLock::Create(
+            const_cast<TensorBuffer&>(it->second),
+            TensorBuffer::LockMode::kRead);
+        if (!lock) continue;
+        const uint8_t* bytes = static_cast<const uint8_t*>(lock->second);
+        auto sz_or = it->second.PackedSize();
+        size_t sz = sz_or.HasValue() ? sz_or.Value() : 0;
+        size_t sample = std::min<size_t>(sz, 256);
+        for (size_t i = 0; i < sample; ++i) {
+          if (bytes[i] != 0) any_nonzero = true;
+          total ^= bytes[i];
+          total *= 1099511628211ULL;
+        }
+        total_bytes += sample;
+      }
+      ABSL_LOG(ERROR) << "[LORA-DBG] prefill sig=\"" << prefill_signature
+                      << "\" lora_id=" << lora_id_str
+                      << " n_lora_buffers=" << lora_buffers.size()
+                      << " hash=" << absl::StrFormat("%016x@%zub", total, total_bytes)
+                      << " any_nonzero=" << any_nonzero;
+    }
     for (auto& [input_name, input_buffer] : lora_buffers) {
       input_buffers[input_name] = std::move(input_buffer);
     }
@@ -1073,10 +1139,88 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
   // Metal/WebGPU/CPU all see consistently-typed tensors.
   const std::optional<uint32_t> decode_lora_id =
       llm_context_->processed_context().lora_id();
+  // [METAL-RESET] When lora_id transitions for this signature (e.g.
+  // chat→classify or classify→chat), force the compiled model's signature
+  // runner to re-AllocateTensors before the next Run. That re-prepares the
+  // Metal delegate kernel — flushing the cached pipeline state that's
+  // built from the first observed LoRA configuration. Without this hook,
+  // chat decode after a LoRA-bound classifier call produces garbage even
+  // though the LoRA tensor inputs are correctly zero-filled.
+  {
+    std::string sig_key(signature_name);
+    auto it = last_lora_id_per_signature_.find(sig_key);
+    const bool has_prior = (it != last_lora_id_per_signature_.end());
+    const bool changed = has_prior && (it->second != decode_lora_id);
+    if (changed) {
+      auto* impl = reinterpret_cast<LiteRtCompiledModelT*>(compiled_model_->Get());
+      auto mark = impl->MarkSignatureNeedsAllocationByKey(signature_name);
+      // Also rotate the null-LoRA buffers — fresh MTLBuffer pointers may
+      // be required to invalidate the Metal accelerator's pipeline-state
+      // cache, which the delegate-Prepare hook alone doesn't reach.
+      bool rotated_null_lora = false;
+      if (lora_manager_ != nullptr && !decode_lora_id.has_value()) {
+        lora_manager_->ResetNullLora();
+        rotated_null_lora = true;
+      }
+      ABSL_LOG(ERROR) << "[METAL-RESET] decode sig=\"" << signature_name
+                      << "\" lora_id transition "
+                      << (it->second.has_value() ? absl::StrCat(*it->second)
+                                                 : std::string("none"))
+                      << " -> "
+                      << (decode_lora_id.has_value()
+                              ? absl::StrCat(*decode_lora_id)
+                              : std::string("none"))
+                      << " mark_ok=" << mark.HasValue()
+                      << " null_lora_rotated=" << rotated_null_lora;
+    }
+    last_lora_id_per_signature_[sig_key] = decode_lora_id;
+  }
   if (lora_manager_ != nullptr) {
     ASSIGN_OR_RETURN(auto lora_buffers,
                      lora_manager_->GetLoRABuffersOrZero(signature_name,
                                                          decode_lora_id));
+    // [LORA-DBG] Log what we're about to bind into the decode call. Two
+    // questions to answer:
+    //   1. Is decode_lora_id None when chat conversations call decode? If
+    //      not, lora_id is leaking from a prior classifier session.
+    //   2. Are the buffers actually zero-filled when lora_id is None? If
+    //      not, GetLoRABuffersOrZero is handing us classifier-LoRA bytes.
+    {
+      std::string lora_id_str = decode_lora_id.has_value()
+          ? absl::StrCat(*decode_lora_id) : "none";
+      // Hash first 256 bytes of each LoRA buffer (in name order) using
+      // FNV-1a 64-bit. Cheap (~24KB readback) and detects any non-zero.
+      uint64_t total = 14695981039346656037ULL;
+      size_t total_bytes = 0;
+      bool any_nonzero = false;
+      std::vector<absl::string_view> names;
+      names.reserve(lora_buffers.size());
+      for (const auto& kv : lora_buffers) names.push_back(kv.first);
+      std::sort(names.begin(), names.end());
+      for (const auto& nm : names) {
+        auto it = lora_buffers.find(nm);
+        if (it == lora_buffers.end()) continue;
+        auto lock = ::litert::TensorBufferScopedLock::Create(
+            const_cast<TensorBuffer&>(it->second),
+            TensorBuffer::LockMode::kRead);
+        if (!lock) continue;
+        const uint8_t* bytes = static_cast<const uint8_t*>(lock->second);
+        auto sz_or = it->second.PackedSize();
+        size_t sz = sz_or.HasValue() ? sz_or.Value() : 0;
+        size_t sample = std::min<size_t>(sz, 256);
+        for (size_t i = 0; i < sample; ++i) {
+          if (bytes[i] != 0) any_nonzero = true;
+          total ^= bytes[i];
+          total *= 1099511628211ULL;
+        }
+        total_bytes += sample;
+      }
+      ABSL_LOG(ERROR) << "[LORA-DBG] decode sig=\"" << signature_name
+                      << "\" lora_id=" << lora_id_str
+                      << " n_lora_buffers=" << lora_buffers.size()
+                      << " hash=" << absl::StrFormat("%016x@%zub", total, total_bytes)
+                      << " any_nonzero=" << any_nonzero;
+    }
     for (auto& [input_name, input_buffer] : lora_buffers) {
       decode_input_buffers[input_name] = std::move(input_buffer);
     }
@@ -1986,13 +2130,27 @@ LlmLiteRtCompiledModelExecutorStatic::Create(
     }
   }
 
+  // For classifier-only decode signatures (e.g. `decode_classifier` with
+  // skip_lm_head=True), there is no `logits` output. The sampler still
+  // needs SOME buffer to populate per call — point it at classifier_logits
+  // as a stand-in. The sampled token is unused (callers read
+  // classifier_logits via GetAuxiliaryOutput); the sampler just needs to
+  // not crash.
+  absl::string_view effective_logits_name = signatures.output_logits;
+  if (effective_logits_name.empty() &&
+      signatures.output_classifier_logits.has_value()) {
+    effective_logits_name = *signatures.output_classifier_logits;
+  }
   LITERT_ASSIGN_OR_RETURN(
       auto output_logits_buffer,
-      decode_output_buffers[signatures.output_logits].Duplicate());
+      decode_output_buffers[effective_logits_name].Duplicate());
   LITERT_ASSIGN_OR_RETURN(auto output_logits_buffer_tensor_type,
                           output_logits_buffer.TensorType());
-  RET_CHECK(output_logits_buffer_tensor_type.Layout().Dimensions().size() == 3)
-      << "Output logits must be (batch, seq, vocab)";
+  const int n_logits_dims =
+      output_logits_buffer_tensor_type.Layout().Dimensions().size();
+  RET_CHECK(n_logits_dims == 2 || n_logits_dims == 3)
+      << "Output logits must be (batch, seq, vocab) or "
+         "(batch, n_classes) for classifier-only sigs";
   int batch_size = output_logits_buffer_tensor_type.Layout().Dimensions()[0];
 
   std::optional<absl::flat_hash_map<absl::string_view, TensorBuffer>>
@@ -2373,13 +2531,24 @@ LlmLiteRtCompiledModelExecutorDynamic::Create(
       int v_dynamic_dim,
       GetDynamicDimIndex(*litert_model, "prefill", value_cache_input_names[0]));
 
+  // Classifier-only decode sig fallback (same rationale as the prefill-decode
+  // construction path above): point sampler buffer at classifier_logits if
+  // no `logits` output is declared.
+  absl::string_view effective_logits_name_emb = signatures.output_logits;
+  if (effective_logits_name_emb.empty() &&
+      signatures.output_classifier_logits.has_value()) {
+    effective_logits_name_emb = *signatures.output_classifier_logits;
+  }
   LITERT_ASSIGN_OR_RETURN(
       auto output_logits_buffer,
-      decode_output_buffers[signatures.output_logits].Duplicate());
+      decode_output_buffers[effective_logits_name_emb].Duplicate());
   LITERT_ASSIGN_OR_RETURN(auto output_logits_buffer_tensor_type,
                           output_logits_buffer.TensorType());
-  RET_CHECK(output_logits_buffer_tensor_type.Layout().Dimensions().size() == 3)
-      << "Output logits must be (batch, seq, vocab)";
+  const int n_logits_dims_emb =
+      output_logits_buffer_tensor_type.Layout().Dimensions().size();
+  RET_CHECK(n_logits_dims_emb == 2 || n_logits_dims_emb == 3)
+      << "Output logits must be (batch, seq, vocab) or "
+         "(batch, n_classes) for classifier-only sigs";
   int batch_size = output_logits_buffer_tensor_type.Layout().Dimensions()[0];
   RET_CHECK_EQ(batch_size, 1) << "Only support batch size 1 for now.";
   std::unique_ptr<EmbeddingLookupManager> embedding_lookup;
