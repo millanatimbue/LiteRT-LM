@@ -342,6 +342,7 @@ struct LiteRtLmConversationConfig {
   bool filter_channel_content_from_kv_cache = false;
   bool stream_tool_calls = false;
   std::string stream_tool_calls_channel_name = "tool_call";
+  bool skip_chat_template = false;
   bool prefill_preface_on_init = false;
 };
 
@@ -597,6 +598,13 @@ void litert_lm_conversation_config_set_prefill_preface_on_init(
     LiteRtLmConversationConfig* config, bool prefill_preface_on_init) {
   if (config) {
     config->prefill_preface_on_init = prefill_preface_on_init;
+  }
+}
+
+void litert_lm_conversation_config_set_skip_chat_template(
+    LiteRtLmConversationConfig* config, bool skip_chat_template) {
+  if (config) {
+    config->skip_chat_template = skip_chat_template;
   }
 }
 
@@ -1306,6 +1314,7 @@ LiteRtLmConversation* litert_lm_conversation_create(
     builder.SetStreamToolCalls(c_config->stream_tool_calls,
                                c_config->stream_tool_calls_channel_name);
     builder.SetPrefillPrefaceOnInit(c_config->prefill_preface_on_init);
+    builder.SetSkipChatTemplate(c_config->skip_chat_template);
     auto config = builder.Build(*engine->engine);
 
     if (!config.ok()) {

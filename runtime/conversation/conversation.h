@@ -134,6 +134,11 @@ class ConversationConfig {
     return suppress_tokens_config_;
   }
 
+  // Returns whether to bypass the chat template and prefill the message
+  // content verbatim. Used for classifier-head invocations whose pooling
+  // reads `hidden_states[:, -1, :]` and was trained on raw text.
+  bool skip_chat_template() const { return skip_chat_template_; }
+
  public:
   // Builder class for ConversationConfig.
   //
@@ -259,6 +264,13 @@ class ConversationConfig {
       return *this;
     }
 
+    // Sets whether to bypass the chat template — see ConversationConfig::
+    // skip_chat_template() above.
+    Builder& SetSkipChatTemplate(bool skip_chat_template) {
+      skip_chat_template_ = skip_chat_template;
+      return *this;
+    }
+
     absl::StatusOr<ConversationConfig> Build(const Engine& engine) {
       return ConversationConfig::CreateInternal(
           engine, session_config_, preface_, overwrite_prompt_template_,
@@ -267,7 +279,8 @@ class ConversationConfig {
           filter_channel_content_from_kv_cache_, return_error_on_parse_failure_,
           return_error_on_max_tokens_reached_, thinking_config_,
           stream_tool_calls_, stream_tool_calls_channel_name_,
-          repetition_penalty_config_, suppress_tokens_config_);
+          repetition_penalty_config_, suppress_tokens_config_,
+          skip_chat_template_);
     }
 
     // Returns a unique pointer to a ConversationConfig.
@@ -296,6 +309,7 @@ class ConversationConfig {
         RepetitionPenaltyConfig::Default();
     SuppressTokensConfig suppress_tokens_config_ =
         SuppressTokensConfig::Default();
+    bool skip_chat_template_ = false;
   };
 
   // Returns the constrained decoding config.
@@ -354,7 +368,8 @@ class ConversationConfig {
       RepetitionPenaltyConfig repetition_penalty_config =
           RepetitionPenaltyConfig::Default(),
       SuppressTokensConfig suppress_tokens_config =
-          SuppressTokensConfig::Default());
+          SuppressTokensConfig::Default(),
+      bool skip_chat_template = false);
 
   explicit ConversationConfig(
       SessionConfig session_config, Preface preface,
@@ -373,7 +388,8 @@ class ConversationConfig {
       RepetitionPenaltyConfig repetition_penalty_config =
           RepetitionPenaltyConfig::Default(),
       SuppressTokensConfig suppress_tokens_config =
-          SuppressTokensConfig::Default())
+          SuppressTokensConfig::Default(),
+      bool skip_chat_template = false)
       : session_config_(std::move(session_config)),
         preface_(std::move(preface)),
         prompt_template_(std::move(prompt_template)),
@@ -390,7 +406,8 @@ class ConversationConfig {
         stream_tool_calls_(stream_tool_calls),
         stream_tool_calls_channel_name_(stream_tool_calls_channel_name),
         repetition_penalty_config_(std::move(repetition_penalty_config)),
-        suppress_tokens_config_(std::move(suppress_tokens_config)) {}
+        suppress_tokens_config_(std::move(suppress_tokens_config)),
+        skip_chat_template_(skip_chat_template) {}
 
   SessionConfig session_config_;
   Preface preface_;
@@ -408,6 +425,7 @@ class ConversationConfig {
   std::string stream_tool_calls_channel_name_;
   RepetitionPenaltyConfig repetition_penalty_config_;
   SuppressTokensConfig suppress_tokens_config_;
+  bool skip_chat_template_;
 };
 
 // Optional arguments for sending a message to the LLM.

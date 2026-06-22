@@ -125,7 +125,7 @@ absl::StatusOr<ConversationConfig> ConversationConfig::CreateInternal(
     std::optional<ThinkingConfig> thinking_config, bool stream_tool_calls,
     const std::string& stream_tool_calls_channel_name,
     RepetitionPenaltyConfig repetition_penalty_config,
-    SuppressTokensConfig suppress_tokens_config) {
+    SuppressTokensConfig suppress_tokens_config, bool skip_chat_template) {
   if (preface.has_value() && !std::holds_alternative<JsonPreface>(*preface)) {
     return absl::InvalidArgumentError("Only JsonPreface is supported for now.");
   }
@@ -203,7 +203,7 @@ absl::StatusOr<ConversationConfig> ConversationConfig::CreateInternal(
       filter_channel_content_from_kv_cache, return_error_on_parse_failure,
       return_error_on_max_tokens_reached, thinking_config, stream_tool_calls,
       stream_tool_calls_channel_name, std::move(repetition_penalty_config),
-      std::move(suppress_tokens_config));
+      std::move(suppress_tokens_config), skip_chat_template);
 }
 
 absl::StatusOr<std::string>
@@ -527,12 +527,49 @@ absl::StatusOr<Message> Conversation::SendMessage(const Message& message,
   return history_.back();
 }
 
+// Extract the raw text content from a user message JSON without going
+// through the chat template. Supports message["content"] as either a plain
+// string or an array of {type: "text", text: "..."} parts (the
+// OpenAI/Anthropic-style content list iOS builds). Used when the
+// ConversationConfig has skip_chat_template() set — see comment there.
+static absl::StatusOr<std::string> ExtractRawMessageText(
+    const Message& message) {
+  if (message.is_string()) return message.get<std::string>();
+  if (!message.is_object() || !message.contains("content")) {
+    return absl::InvalidArgumentError(
+        "skip_chat_template: message must be a string or object with "
+        "\"content\".");
+  }
+  const auto& content = message["content"];
+  if (content.is_string()) return content.get<std::string>();
+  if (content.is_array()) {
+    std::string result;
+    for (const auto& part : content) {
+      if (part.is_object() && part.contains("text") &&
+          part["text"].is_string()) {
+        result += part["text"].get<std::string>();
+      }
+    }
+    return result;
+  }
+  return absl::InvalidArgumentError(
+      "skip_chat_template: message[\"content\"] must be string or array.");
+}
+
 absl::Status Conversation::SendMessageAsync(
     const Message& message,
     absl::AnyInvocable<void(absl::StatusOr<Message>)> user_callback,
     OptionalArgs optional_args) {
-  ABSL_ASSIGN_OR_RETURN(const std::string& single_turn_text,
-                        GetSingleTurnText(message, optional_args));
+  std::string single_turn_text;
+  if (config_.skip_chat_template()) {
+    // Raw-text path for classifier-head sessions — see ConversationConfig::
+    // skip_chat_template() doc. Chat-templating would put a boundary token at
+    // hidden_states[:, -1, :], where the classifier head pools.
+    ABSL_ASSIGN_OR_RETURN(single_turn_text, ExtractRawMessageText(message));
+  } else {
+    ABSL_ASSIGN_OR_RETURN(single_turn_text,
+                          GetSingleTurnText(message, optional_args));
+  }
   auto open_channel_name =
       GetOpenChannelName(single_turn_text, config_.GetChannels());
 
