@@ -35,6 +35,7 @@ on:
   push:
     branches:
       - main
+      - 'experiment/**'
     tags:
       - 'xcframework-*'
   pull_request:
@@ -113,12 +114,21 @@ jobs:
       # and copy them into this fork's `prebuilt/` directory. They're both
       # build-time link inputs for bazel AND the source from which we wrap the
       # four accelerator XCFrameworks below.
+      #
+      # CRITICAL: pin to upstream commit b41cb27 (May 25 vintage). Google has
+      # force-pushed newer versions of these blobs that fail CompiledModel::
+      # Create with status=504 kLiteRtStatusErrorCompilation on iOS Metal.
+      # Known-good libLiteRt.dylib sha256:
+      #   7798a6eb6f9abbfc000a99394eb060a7835edb9303b02e612bee2424a71a32ca
+      # See LOCAL_BUILD.md §2 for the full rationale.
       - name: Fetch iOS prebuilt dylibs from upstream
         run: |
           set -euo pipefail
+          UPSTREAM_DYLIB_PIN="b41cb27"
           cd "$RUNNER_TEMP"
-          git clone --depth 1 https://github.com/google-ai-edge/LiteRT-LM upstream-prebuilts
+          git clone --filter=blob:none https://github.com/google-ai-edge/LiteRT-LM upstream-prebuilts
           cd upstream-prebuilts
+          git checkout "$UPSTREAM_DYLIB_PIN"
           git lfs install
           git lfs pull --include "prebuilt/ios_arm64/*,prebuilt/ios_sim_arm64/*"
           mkdir -p "$GITHUB_WORKSPACE/prebuilt"
@@ -126,6 +136,16 @@ jobs:
           cp -R prebuilt/ios_sim_arm64 "$GITHUB_WORKSPACE/prebuilt/"
           echo "=== device dylibs ===" && ls -lh "$GITHUB_WORKSPACE/prebuilt/ios_arm64/" || true
           echo "=== simulator dylibs ===" && ls -lh "$GITHUB_WORKSPACE/prebuilt/ios_sim_arm64/" || true
+          # Verify libLiteRt.dylib matches the known-good sha (catches future
+          # upstream force-push regressions early).
+          EXPECT="7798a6eb6f9abbfc000a99394eb060a7835edb9303b02e612bee2424a71a32ca"
+          GOT="$(shasum -a 256 "$GITHUB_WORKSPACE/prebuilt/ios_arm64/libLiteRt.dylib" | awk '{print $1}')"
+          if [ "$GOT" != "$EXPECT" ]; then
+            echo "::error::libLiteRt.dylib sha256 mismatch (got $GOT, expect $EXPECT)" \
+                 "— upstream b41cb27 has drifted or pin is wrong."
+            exit 1
+          fi
+          echo "libLiteRt.dylib sha matches known-good vintage."
 
       - name: Smoke test - bazel query //swift:CLiteRTLM
         run: bazelisk query //swift:CLiteRTLM
