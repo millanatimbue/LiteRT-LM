@@ -247,6 +247,11 @@ public actor Engine {
       cConversationConfig, conversationConfig.prefillPrefaceOnInit)
     litert_lm_conversation_config_set_skip_chat_template(
       cConversationConfig, conversationConfig.skipChatTemplate)
+    if let regex = conversationConfig.regexConstraint {
+      regex.withCString { cRegex in
+        litert_lm_conversation_config_set_regex_constraint(cConversationConfig, cRegex)
+      }
+    }
 
     guard
       let conversationHandle = litert_lm_conversation_create(
