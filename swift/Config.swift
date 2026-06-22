@@ -182,6 +182,17 @@ public struct ConversationConfig {
   /// flows — those need the chat template Gemma was trained against.
   public let skipChatTemplate: Bool
 
+  /// Optional LlGuidance regex constraint applied to every `sendMessage` call
+  /// on the resulting conversation. When set, the runtime instantiates the
+  /// LlGuidance constraint provider and attaches a per-call
+  /// `LlGuidanceConstraintArg{ kRegex, regex }` to the decoding constraint —
+  /// the FSM rejects any token that would put the generated output outside
+  /// the regex's language.
+  ///
+  /// Cloned conversations inherit the parent's regex. `nil` disables the
+  /// constraint (default).
+  public let regexConstraint: String?
+
   /// - Parameters:
   ///   - systemMessage: The system message to be used in the conversation.
   ///   - initialMessages: The initial messages to populate the conversation history.
@@ -195,6 +206,8 @@ public struct ConversationConfig {
   ///   - maxOutputTokens: Cap on decode steps. Set to `1` for classification.
   ///   - skipChatTemplate: Bypass chat-template wrapping; required for
   ///     classifier-head sessions. See doc on `skipChatTemplate` above.
+  ///   - regexConstraint: LlGuidance regex applied per `sendMessage` call.
+  ///     See doc on `regexConstraint` above.
   public init(
     systemMessage: Message? = nil,
     initialMessages: [Message] = [],
@@ -203,7 +216,8 @@ public struct ConversationConfig {
     prefillPrefaceOnInit: Bool = false,
     scopedLoraFile: URL? = nil,
     maxOutputTokens: Int? = nil,
-    skipChatTemplate: Bool = false
+    skipChatTemplate: Bool = false,
+    regexConstraint: String? = nil
   ) {
     self.systemMessage = systemMessage.map { msg in
       msg.role == .system
@@ -216,5 +230,6 @@ public struct ConversationConfig {
     self.scopedLoraFile = scopedLoraFile
     self.maxOutputTokens = maxOutputTokens
     self.skipChatTemplate = skipChatTemplate
+    self.regexConstraint = regexConstraint
   }
 }

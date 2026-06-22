@@ -244,6 +244,25 @@ LITERT_LM_C_API_EXPORT
 void litert_lm_conversation_config_set_skip_chat_template(
     LiteRtLmConversationConfig* config, bool skip_chat_template);
 
+// Sets an LlGuidance regex constraint that will be applied to every
+// SendMessage call on the resulting conversation. When set, the runtime
+// wires up the LlGuidance constraint provider at conversation create time
+// and attaches a fresh `LlGuidanceConstraintArg{kRegex, regex}` to the
+// per-call decoding constraint, so the FSM rejects any token sequence
+// the regex doesn't accept.
+//
+// Pass NULL or an empty string to clear / disable the constraint.
+//
+// Note: applies to `litert_lm_conversation_send_message` and
+// `litert_lm_conversation_send_message_stream`. Cloned conversations
+// inherit the parent's regex.
+//
+// @param config The config to modify.
+// @param regex  UTF-8 regex pattern string, or NULL to clear.
+LITERT_LM_C_API_EXPORT
+void litert_lm_conversation_config_set_regex_constraint(
+    LiteRtLmConversationConfig* config, const char* regex);
+
 // Destroys a LiteRT LM Conversation Config.
 // @param config The config to destroy.
 LITERT_LM_C_API_EXPORT
