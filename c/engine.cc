@@ -218,6 +218,7 @@ struct LiteRtLmConversationConfig {
   std::string extra_context_json;
   bool enable_constrained_decoding = false;
   bool filter_channel_content_from_kv_cache = false;
+  bool skip_chat_template = false;
   bool prefill_preface_on_init = false;
 };
 
@@ -382,6 +383,13 @@ void litert_lm_conversation_config_set_prefill_preface_on_init(
     LiteRtLmConversationConfig* config, bool prefill_preface_on_init) {
   if (config) {
     config->prefill_preface_on_init = prefill_preface_on_init;
+  }
+}
+
+void litert_lm_conversation_config_set_skip_chat_template(
+    LiteRtLmConversationConfig* config, bool skip_chat_template) {
+  if (config) {
+    config->skip_chat_template = skip_chat_template;
   }
 }
 
@@ -977,6 +985,7 @@ LiteRtLmConversation* litert_lm_conversation_create(
     builder.SetFilterChannelContentFromKvCache(
         c_config->filter_channel_content_from_kv_cache);
     builder.SetPrefillPrefaceOnInit(c_config->prefill_preface_on_init);
+    builder.SetSkipChatTemplate(c_config->skip_chat_template);
     auto config = builder.Build(*engine->engine);
 
     if (!config.ok()) {

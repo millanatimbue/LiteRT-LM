@@ -92,6 +92,14 @@ class ConversationConfig {
     return filter_channel_content_from_kv_cache_;
   }
 
+  // Returns whether to bypass the chat template and prefill the message
+  // content verbatim. Used for classifier-head invocations whose pooling
+  // reads `hidden_states[:, -1, :]` and was trained on raw text — wrapping
+  // the input with `<start_of_turn>user\n...<end_of_turn>\n<start_of_turn>
+  // model\n` puts a boundary token at position -1, which carries no document
+  // content and collapses the head's discriminative range.
+  bool skip_chat_template() const { return skip_chat_template_; }
+
  public:
   // Builder class for ConversationConfig.
   //
@@ -176,12 +184,19 @@ class ConversationConfig {
       return *this;
     }
 
+    // Sets whether to bypass the chat template — see ConversationConfig::
+    // skip_chat_template() above.
+    Builder& SetSkipChatTemplate(bool skip_chat_template) {
+      skip_chat_template_ = skip_chat_template;
+      return *this;
+    }
+
     absl::StatusOr<ConversationConfig> Build(const Engine& engine) {
       return ConversationConfig::CreateInternal(
           engine, session_config_, preface_, overwrite_prompt_template_,
           overwrite_processor_config_, enable_constrained_decoding_,
           prefill_preface_on_init_, constraint_provider_config_, channels_,
-          filter_channel_content_from_kv_cache_);
+          filter_channel_content_from_kv_cache_, skip_chat_template_);
     }
 
     // Returns a unique pointer to a ConversationConfig.
@@ -201,6 +216,7 @@ class ConversationConfig {
     std::optional<ConstraintProviderConfig> constraint_provider_config_;
     std::optional<std::vector<Channel>> channels_ = std::nullopt;
     bool filter_channel_content_from_kv_cache_ = false;
+    bool skip_chat_template_ = false;
   };
 
   // Returns the constrained decoding config.
@@ -246,7 +262,8 @@ class ConversationConfig {
       std::optional<ConstraintProviderConfig> constraint_provider_config =
           std::nullopt,
       std::optional<std::vector<Channel>> channels = std::nullopt,
-      bool filter_channel_content_from_kv_cache = false);
+      bool filter_channel_content_from_kv_cache = false,
+      bool skip_chat_template = false);
 
   explicit ConversationConfig(SessionConfig session_config, Preface preface,
                               PromptTemplate prompt_template,
@@ -256,7 +273,8 @@ class ConversationConfig {
                               std::optional<ConstraintProviderConfig>
                                   constraint_provider_config = std::nullopt,
                               std::vector<Channel> channels = {},
-                              bool filter_channel_content_from_kv_cache = false)
+                              bool filter_channel_content_from_kv_cache = false,
+                              bool skip_chat_template = false)
       : session_config_(std::move(session_config)),
         preface_(std::move(preface)),
         prompt_template_(std::move(prompt_template)),
@@ -266,7 +284,8 @@ class ConversationConfig {
         constraint_provider_config_(std::move(constraint_provider_config)),
         channels_(std::move(channels)),
         filter_channel_content_from_kv_cache_(
-            filter_channel_content_from_kv_cache) {}
+            filter_channel_content_from_kv_cache),
+        skip_chat_template_(skip_chat_template) {}
 
   SessionConfig session_config_;
   Preface preface_;
@@ -277,6 +296,7 @@ class ConversationConfig {
   std::optional<ConstraintProviderConfig> constraint_provider_config_;
   std::vector<Channel> channels_;
   bool filter_channel_content_from_kv_cache_;
+  bool skip_chat_template_;
 };
 
 // Optional arguments for sending a message to the LLM.

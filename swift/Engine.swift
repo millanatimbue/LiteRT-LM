@@ -205,6 +205,8 @@ public actor Engine {
       cConversationConfig, ExperimentalFlags.enableConversationConstrainedDecoding)
     litert_lm_conversation_config_set_prefill_preface_on_init(
       cConversationConfig, conversationConfig.prefillPrefaceOnInit)
+    litert_lm_conversation_config_set_skip_chat_template(
+      cConversationConfig, conversationConfig.skipChatTemplate)
 
     guard
       let conversationHandle = litert_lm_conversation_create(

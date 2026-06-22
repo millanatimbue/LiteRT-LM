@@ -231,6 +231,19 @@ LITERT_LM_C_API_EXPORT
 void litert_lm_conversation_config_set_prefill_preface_on_init(
     LiteRtLmConversationConfig* config, bool prefill_preface_on_init);
 
+// Sets whether to bypass the chat template and prefill the message content
+// verbatim. Used for classifier-head sessions whose pooling reads
+// hidden_states[:, -1, :] and was trained on raw text — chat-templated input
+// puts a boundary token at position -1, collapsing the head's discriminative
+// range. Generation paths should keep this at false (the default) so the
+// Gemma chat template wraps the prompt as expected.
+// @param config The config to modify.
+// @param skip_chat_template Whether to skip the chat template for this
+//   conversation's prefill.
+LITERT_LM_C_API_EXPORT
+void litert_lm_conversation_config_set_skip_chat_template(
+    LiteRtLmConversationConfig* config, bool skip_chat_template);
+
 // Destroys a LiteRT LM Conversation Config.
 // @param config The config to destroy.
 LITERT_LM_C_API_EXPORT

@@ -102,7 +102,7 @@ absl::StatusOr<ConversationConfig> ConversationConfig::CreateInternal(
     bool enable_constrained_decoding, bool prefill_preface_on_init,
     std::optional<ConstraintProviderConfig> constraint_provider_config,
     std::optional<std::vector<Channel>> overwrite_channels,
-    bool filter_channel_content_from_kv_cache) {
+    bool filter_channel_content_from_kv_cache, bool skip_chat_template) {
   if (preface.has_value() && !std::holds_alternative<JsonPreface>(*preface)) {
     return absl::InvalidArgumentError("Only JsonPreface is supported for now.");
   }
@@ -168,7 +168,7 @@ absl::StatusOr<ConversationConfig> ConversationConfig::CreateInternal(
       session_config_copy, preface.value_or(JsonPreface()), prompt_template,
       processor_config, enable_constrained_decoding, prefill_preface_on_init,
       std::move(constraint_provider_config), std::move(channels),
-      filter_channel_content_from_kv_cache);
+      filter_channel_content_from_kv_cache, skip_chat_template);
 }
 
 absl::StatusOr<std::string>
@@ -322,9 +322,6 @@ absl::StatusOr<std::unique_ptr<Conversation>> Conversation::Create(
       engine, std::move(session), std::move(model_data_processor),
       config.GetPreface(), config.GetPromptTemplate(), config,
       std::move(constraint_provider)));
-  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Create: prefill_preface_on_init="
-                 << config.prefill_preface_on_init()
-                 << " empty_preface=" << IsEmptyPreface(config.GetPreface());
   if (config.prefill_preface_on_init() &&
       !IsEmptyPreface(config.GetPreface())) {
     std::string single_turn_text;
@@ -434,12 +431,51 @@ absl::StatusOr<Message> Conversation::SendMessage(const Message& message,
   return history_.back();
 }
 
+// Extract the raw text content from a user message JSON without going
+// through the chat template. Supports message["content"] as either a plain
+// string or an array of {type: "text", text: "..."} parts (the
+// OpenAI/Anthropic-style content list iOS builds). Used when the
+// ConversationConfig has skip_chat_template() set — see comment there.
+static absl::StatusOr<std::string> ExtractRawMessageText(
+    const Message& message) {
+  if (message.is_string()) return message.get<std::string>();
+  if (!message.is_object() || !message.contains("content")) {
+    return absl::InvalidArgumentError(
+        "skip_chat_template: message must be a string or object with "
+        "\"content\".");
+  }
+  const auto& content = message["content"];
+  if (content.is_string()) return content.get<std::string>();
+  if (content.is_array()) {
+    std::string result;
+    for (const auto& part : content) {
+      if (part.is_object() && part.contains("text") &&
+          part["text"].is_string()) {
+        result += part["text"].get<std::string>();
+      }
+    }
+    return result;
+  }
+  return absl::InvalidArgumentError(
+      "skip_chat_template: message[\"content\"] must be string or array.");
+}
+
 absl::Status Conversation::SendMessageAsync(
     const Message& message,
     absl::AnyInvocable<void(absl::StatusOr<Message>)> user_callback,
     OptionalArgs optional_args) {
-  ASSIGN_OR_RETURN(const std::string& single_turn_text,
-                   GetSingleTurnText(message, optional_args));
+  std::string single_turn_text;
+  if (config_.skip_chat_template()) {
+    // Raw-text path for classifier-head sessions — see ConversationConfig::
+    // skip_chat_template() doc. The chat template would otherwise wrap the
+    // tweet text in <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>
+    // model\n, putting a boundary token at hidden_states[:, -1, :], which is
+    // where the classifier head pools — collapsing its discriminative range.
+    ASSIGN_OR_RETURN(single_turn_text, ExtractRawMessageText(message));
+  } else {
+    ASSIGN_OR_RETURN(single_turn_text,
+                     GetSingleTurnText(message, optional_args));
+  }
   auto open_channel_name =
       GetOpenChannelName(single_turn_text, config_.GetChannels());
 
@@ -676,18 +712,9 @@ void Conversation::CancelGroup(absl::string_view task_group_id) {
 }
 
 absl::StatusOr<std::unique_ptr<Conversation>> Conversation::Clone() {
-  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Clone: enter, this="
-                 << static_cast<const void*>(this)
-                 << " prefill_preface_on_init="
-                 << config_.prefill_preface_on_init();
   auto session_or = session_->Clone();
-  if (!session_or.ok()) {
-    ABSL_LOG(ERROR) << "[CLONE-DBG] Conversation::Clone: session->Clone failed: "
-                    << session_or.status();
-    return session_or.status();
-  }
+  if (!session_or.ok()) return session_or.status();
   auto session = std::move(*session_or);
-  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Clone: session cloned ok";
 
   auto mdp_or = CreateModelDataProcessor(
       config_.GetProcessorConfig(), config_.GetPreface(),
@@ -695,23 +722,12 @@ absl::StatusOr<std::unique_ptr<Conversation>> Conversation::Clone() {
       session->GetSessionConfig().GetStopTokenIds(),
       config_.constrained_decoding_enabled(),
       config_.GetPromptTemplate().GetCapabilities());
-  if (!mdp_or.ok()) {
-    ABSL_LOG(ERROR)
-        << "[CLONE-DBG] Conversation::Clone: CreateModelDataProcessor failed: "
-        << mdp_or.status();
-    return mdp_or.status();
-  }
+  if (!mdp_or.ok()) return mdp_or.status();
   std::unique_ptr<ModelDataProcessor> model_data_processor =
       std::move(*mdp_or);
 
   auto status = model_data_processor->CloneState(*model_data_processor_);
-  if (!status.ok() && !absl::IsUnimplemented(status)) {
-    ABSL_LOG(ERROR) << "[CLONE-DBG] Conversation::Clone: CloneState failed: "
-                    << status;
-    return status;
-  }
-  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Clone: CloneState ok (or "
-                    "unimplemented, which is fine)";
+  if (!status.ok() && !absl::IsUnimplemented(status)) return status;
 
   std::unique_ptr<ConstraintProvider> constraint_provider;
   if (config_.constraint_provider_config().has_value()) {
@@ -730,8 +746,6 @@ absl::StatusOr<std::unique_ptr<Conversation>> Conversation::Clone() {
     absl::MutexLock lock(history_mutex_);  // NOLINT
     new_conversation->history_ = history_;
   }
-  ABSL_LOG(INFO) << "[CLONE-DBG] Conversation::Clone: success, new this="
-                 << static_cast<const void*>(new_conversation.get());
   return new_conversation;
 }
 
