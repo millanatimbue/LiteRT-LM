@@ -412,6 +412,15 @@ class LockedLlmExecutor : public LlmExecutor {
     return llm_executor_->SetCurrentStep(new_step);
   }
 
+  // Forward GetAuxiliaryOutput to the wrapped executor. Without this override,
+  // the base LlmExecutor::GetAuxiliaryOutput is hit (UnimplementedError), so
+  // SerialExecutionManager / ThreadedExecutionManager can never reach the
+  // LiteRT compiled-model executor's actual implementation.
+  absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
+      absl::string_view name) override {
+    return llm_executor_->GetAuxiliaryOutput(name);
+  }
+
   absl::StatusOr<const ProcessedTokens*> GetProcessedTokens() const override {
     return llm_executor_->GetProcessedTokens();
   }
