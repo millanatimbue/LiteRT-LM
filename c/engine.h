@@ -143,6 +143,18 @@ LITERT_LM_C_API_EXPORT
 void litert_lm_session_config_set_sampler_params(
     LiteRtLmSessionConfig* config, const LiteRtLmSamplerParams* sampler_params);
 
+// Sets a scoped LoRA adapter `.tflite` file for this session. The runtime
+// merges the file's named LoRA tensors into both prefill and decode signatures
+// (LoRA tensor inputs must be declared in the compiled model — see the
+// LiteRT-LM LoRA regex in `runtime/util/lora_util.cc`). Pass NULL or an empty
+// string to clear a previously-set LoRA. Returns `true` on success, `false` if
+// the file can't be opened.
+// @param config The config to modify.
+// @param path Filesystem path to the LoRA adapter `.tflite`.
+LITERT_LM_C_API_EXPORT
+bool litert_lm_session_config_set_scoped_lora_file(
+    LiteRtLmSessionConfig* config, const char* path);
+
 // Destroys a LiteRT LM Session Config.
 // @param config The config to destroy.
 LITERT_LM_C_API_EXPORT
@@ -218,6 +230,38 @@ void litert_lm_conversation_config_set_filter_channel_content_from_kv_cache(
 LITERT_LM_C_API_EXPORT
 void litert_lm_conversation_config_set_prefill_preface_on_init(
     LiteRtLmConversationConfig* config, bool prefill_preface_on_init);
+
+// Sets whether to bypass the chat template and prefill the message content
+// verbatim. Used for classifier-head sessions whose pooling reads
+// hidden_states[:, -1, :] and was trained on raw text — chat-templated input
+// puts a boundary token at position -1, collapsing the head's discriminative
+// range. Generation paths should keep this at false (the default) so the
+// Gemma chat template wraps the prompt as expected.
+// @param config The config to modify.
+// @param skip_chat_template Whether to skip the chat template for this
+//   conversation's prefill.
+LITERT_LM_C_API_EXPORT
+void litert_lm_conversation_config_set_skip_chat_template(
+    LiteRtLmConversationConfig* config, bool skip_chat_template);
+
+// Sets an LlGuidance regex constraint that will be applied to every
+// SendMessage call on the resulting conversation. When set, the runtime
+// wires up the LlGuidance constraint provider at conversation create time
+// and attaches a fresh `LlGuidanceConstraintArg{kRegex, regex}` to the
+// per-call decoding constraint, so the FSM rejects any token sequence
+// the regex doesn't accept.
+//
+// Pass NULL or an empty string to clear / disable the constraint.
+//
+// Note: applies to `litert_lm_conversation_send_message` and
+// `litert_lm_conversation_send_message_stream`. Cloned conversations
+// inherit the parent's regex.
+//
+// @param config The config to modify.
+// @param regex  UTF-8 regex pattern string, or NULL to clear.
+LITERT_LM_C_API_EXPORT
+void litert_lm_conversation_config_set_regex_constraint(
+    LiteRtLmConversationConfig* config, const char* regex);
 
 // Destroys a LiteRT LM Conversation Config.
 // @param config The config to destroy.
@@ -796,6 +840,34 @@ const char* litert_lm_conversation_render_message_to_string(
 // @param conversation The conversation to cancel the inference for.
 LITERT_LM_C_API_EXPORT
 void litert_lm_conversation_cancel_process(LiteRtLmConversation* conversation);
+
+// Reads a named auxiliary output tensor populated by the model during the
+// most recent decode step on this conversation. Intended for models whose
+// graph declares output tensors beyond the canonical logits — e.g., a fused
+// classifier head emitting `classifier_logit` alongside generation. The
+// tensor contents are flattened row-major and returned as float32 (float16
+// outputs are widened on copy).
+//
+// Two-call usage: pass NULL `out_floats` with `out_capacity == 0` first to
+// learn the required size via `*out_num_floats`, allocate, then call again
+// to receive the data. If the caller's buffer is large enough on the first
+// call, the data is copied immediately.
+//
+// @param conversation The conversation to read from. Must have produced at
+//   least one model response via send_message before this is called.
+// @param tensor_name Null-terminated UTF-8 name of the output tensor, as
+//   declared by the compiled model's decode signature.
+// @param out_floats Caller-provided float32 buffer, or NULL to query size.
+// @param out_capacity Number of float32 slots available at `out_floats`.
+// @param out_num_floats Out: total number of float32 values the tensor
+//   contains. Always populated when the function returns true.
+// @return true on success (data written or size queried). false on error:
+//   conversation is NULL, the tensor name is not declared by the model, the
+//   model has not yet been decoded, or readback failed.
+LITERT_LM_C_API_EXPORT
+bool litert_lm_conversation_get_aux_output_floats(
+    LiteRtLmConversation* conversation, const char* tensor_name,
+    float* out_floats, size_t out_capacity, size_t* out_num_floats);
 
 // Retrieves the benchmark information from the conversation. The caller is
 // responsible for destroying the benchmark info using

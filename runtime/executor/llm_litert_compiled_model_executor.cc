@@ -1228,6 +1228,48 @@ absl::StatusOr<TensorBuffer> LlmLiteRtCompiledModelExecutorBase::DecodeLogits(
   return output_logits;
 }
 
+absl::StatusOr<std::vector<float>>
+LlmLiteRtCompiledModelExecutorBase::GetAuxiliaryOutput(
+    absl::string_view name) {
+  // decode_output_buffers_ uses string_view keys backed by the compiled
+  // model's signature output names — those storage lifetimes are tied to
+  // the model, not the caller, so we have to look up via the existing keys
+  // rather than constructing a new string_view from the caller's argument.
+  const TensorBuffer* found = nullptr;
+  for (auto& [output_name, buffer] : decode_output_buffers_) {
+    if (output_name == name) {
+      found = &buffer;
+      break;
+    }
+  }
+  if (found == nullptr) {
+    return absl::NotFoundError(absl::StrCat(
+        "Auxiliary output tensor '", name,
+        "' is not declared by the decode signature of the compiled model."));
+  }
+
+  LITERT_ASSIGN_OR_RETURN(auto duplicate, found->Duplicate());
+  LITERT_ASSIGN_OR_RETURN(RankedTensorType tensor_type, duplicate.TensorType());
+  if (tensor_type.ElementType() == ElementType::Float32) {
+    LITERT_ASSIGN_OR_RETURN(auto values,
+                            CopyFromTensorBuffer<float>(duplicate));
+    return values;
+  }
+  if (tensor_type.ElementType() == ElementType::Float16) {
+    LITERT_ASSIGN_OR_RETURN(auto values_f16,
+                            CopyFromTensorBuffer<tflite::half>(duplicate));
+    std::vector<float> widened(values_f16.size());
+    for (size_t i = 0; i < values_f16.size(); ++i) {
+      widened[i] = static_cast<float>(values_f16[i]);
+    }
+    return widened;
+  }
+  return absl::InvalidArgumentError(absl::StrCat(
+      "Auxiliary output '", name,
+      "' has unsupported element type for host readback; expected float32 or "
+      "float16."));
+}
+
 absl::StatusOr<std::string>
 LlmLiteRtCompiledModelExecutorBase::GetPrefillSignatureKey() const {
   std::string prefill_signature_key;

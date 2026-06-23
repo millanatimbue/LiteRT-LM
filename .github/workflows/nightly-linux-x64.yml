@@ -15,22 +15,12 @@
 name: "Nightly-Linux-x64"
 
 on:
+  # Disabled on this fork: this workflow is upstream-inherited and targets
+  # platforms/runners (Linux self-hosted, Windows self-hosted, full macOS
+  # bazel matrix) that this fork does not need. We build only the iOS
+  # XCFramework via .github/workflows/build-ios-xcframework.yml. Trigger
+  # manually via the Actions tab if you need to re-enable temporarily.
   workflow_dispatch:
-    inputs:
-      is_nightly:
-        description: 'Whether to build the nightly package (sets DEV_BUILD=1)'
-        required: true
-        default: true
-        type: boolean
-      publish_to_pypi:
-        description: 'Publish to PyPI'
-        required: true
-        default: false
-        type: boolean
-  # TODO - b/503516226: Pause nightly until the new build is ready.
-  # schedule:
-  #   - cron: '0 21 * * *'
-  #     timezone: 'America/Los_Angeles'
 
 jobs:
   build-linux-wheel:

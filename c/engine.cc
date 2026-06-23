@@ -29,7 +29,10 @@
 #include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/string_view.h"  // from @com_google_absl
 #include "absl/time/time.h"  // from @com_google_absl
+#include "litert/cc/internal/scoped_file.h"  // from @litert
 #include "nlohmann/json.hpp"  // from @nlohmann_json
+#include "runtime/components/constrained_decoding/constraint_provider_config.h"
+#include "runtime/components/constrained_decoding/llg_constraint_config.h"
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
 #include "runtime/conversation/model_data_processor/config_registry.h"
@@ -161,6 +164,9 @@ using ::litert::lm::Engine;
 using ::litert::lm::EngineFactory;
 using ::litert::lm::EngineSettings;
 using ::litert::lm::InputText;
+using ::litert::lm::LlgConstraintType;
+using ::litert::lm::LlGuidanceConfig;
+using ::litert::lm::LlGuidanceConstraintArg;
 using ::litert::lm::OptionalArgs;
 
 using ::litert::lm::Message;
@@ -197,6 +203,12 @@ struct LiteRtLmConversation {
   // ensuring memory safety for the C API caller without requiring explicit
   // per-call deallocation.
   std::string last_rendered_message;
+  // Optional default regex constraint applied to every SendMessage call on
+  // this conversation. When populated, `litert_lm_conversation_send_message*`
+  // attaches an LlGuidance regex `ConstraintArg` to the per-call
+  // OutputOptions. Set via `litert_lm_conversation_config_set_regex_constraint`
+  // at conversation create time; copied here from the config.
+  std::string default_regex_constraint;
 };
 
 struct LiteRtLmJsonResponse {
@@ -217,7 +229,14 @@ struct LiteRtLmConversationConfig {
   std::string extra_context_json;
   bool enable_constrained_decoding = false;
   bool filter_channel_content_from_kv_cache = false;
+  bool skip_chat_template = false;
   bool prefill_preface_on_init = false;
+  // Optional LlGuidance regex constraint applied to every SendMessage call
+  // on the resulting Conversation. Empty string = no constraint. When set,
+  // conversation create wires up `Builder::SetConstraintProviderConfig(
+  // LlGuidanceConfig{})` and stashes the string on `LiteRtLmConversation`
+  // so per-call `SendMessage` attaches a fresh `LlGuidanceConstraintArg`.
+  std::string regex_constraint;
 };
 
 struct LiteRtLmConversationOptionalArgs {
@@ -279,6 +298,27 @@ void litert_lm_session_config_set_apply_prompt_template(
   if (config && config->config) {
     config->config->SetApplyPromptTemplateInSession(apply_prompt_template);
   }
+}
+
+bool litert_lm_session_config_set_scoped_lora_file(
+    LiteRtLmSessionConfig* config, const char* path) {
+  if (!config || !config->config) {
+    return false;
+  }
+  if (path == nullptr || path[0] == '\0') {
+    // Clear the LoRA file.
+    config->config->SetScopedLoraFile(nullptr);
+    return true;
+  }
+  auto scoped = ::litert::ScopedFile::Open(path);
+  if (!scoped.ok()) {
+    ABSL_LOG(ERROR) << "Failed to open LoRA adapter at " << path << ": "
+                    << scoped.status();
+    return false;
+  }
+  auto shared = std::make_shared<::litert::ScopedFile>(*std::move(scoped));
+  config->config->SetScopedLoraFile(shared);
+  return true;
 }
 
 void litert_lm_session_config_set_sampler_params(
@@ -361,6 +401,19 @@ void litert_lm_conversation_config_set_prefill_preface_on_init(
   if (config) {
     config->prefill_preface_on_init = prefill_preface_on_init;
   }
+}
+
+void litert_lm_conversation_config_set_skip_chat_template(
+    LiteRtLmConversationConfig* config, bool skip_chat_template) {
+  if (config) {
+    config->skip_chat_template = skip_chat_template;
+  }
+}
+
+void litert_lm_conversation_config_set_regex_constraint(
+    LiteRtLmConversationConfig* config, const char* regex) {
+  if (!config) return;
+  config->regex_constraint = (regex == nullptr) ? "" : std::string(regex);
 }
 
 void litert_lm_conversation_config_delete(LiteRtLmConversationConfig* config) {
@@ -955,6 +1008,13 @@ LiteRtLmConversation* litert_lm_conversation_create(
     builder.SetFilterChannelContentFromKvCache(
         c_config->filter_channel_content_from_kv_cache);
     builder.SetPrefillPrefaceOnInit(c_config->prefill_preface_on_init);
+    builder.SetSkipChatTemplate(c_config->skip_chat_template);
+    if (!c_config->regex_constraint.empty()) {
+      // Caller supplied a regex; wire up the LlGuidance constraint provider.
+      // The per-call constraint string is attached on each SendMessage by
+      // reading `LiteRtLmConversation::default_regex_constraint` below.
+      builder.SetConstraintProviderConfig(LlGuidanceConfig{});
+    }
     auto config = builder.Build(*engine->engine);
 
     if (!config.ok()) {
@@ -982,6 +1042,9 @@ LiteRtLmConversation* litert_lm_conversation_create(
   }
   auto* c_conversation = new LiteRtLmConversation;
   c_conversation->conversation = *std::move(conversation);
+  if (c_config) {
+    c_conversation->default_regex_constraint = c_config->regex_constraint;
+  }
   return c_conversation;
 }
 
@@ -1010,6 +1073,9 @@ LiteRtLmConversation* litert_lm_conversation_clone(
   }
   auto c_conversation = std::make_unique<LiteRtLmConversation>();
   c_conversation->conversation = std::move(*cloned);
+  // Carry the parent's per-call regex constraint over to the clone so cloned
+  // conversations don't silently lose constrained decoding.
+  c_conversation->default_regex_constraint = conversation->default_regex_constraint;
   ABSL_LOG(INFO) << "[CLONE-DBG] litert_lm_conversation_clone: success";
   return c_conversation.release();
 }
@@ -1033,6 +1099,11 @@ LiteRtLmJsonResponse* litert_lm_conversation_send_message(
       conversation->conversation.get(), extra_context,
       optional_args ? std::optional<int>(optional_args->visual_token_budget)
                     : std::nullopt);
+
+  if (!conversation->default_regex_constraint.empty()) {
+    litert_lm_optional_args.decoding_constraint = LlGuidanceConstraintArg{
+        LlgConstraintType::kRegex, conversation->default_regex_constraint};
+  }
 
   auto response = conversation->conversation->SendMessage(
       json_message, std::move(litert_lm_optional_args));
@@ -1078,6 +1149,11 @@ int litert_lm_conversation_send_message_stream(
       optional_args ? std::optional<int>(optional_args->visual_token_budget)
                     : std::nullopt);
 
+  if (!conversation->default_regex_constraint.empty()) {
+    litert_lm_optional_args.decoding_constraint = LlGuidanceConstraintArg{
+        LlgConstraintType::kRegex, conversation->default_regex_constraint};
+  }
+
   absl::Status status = conversation->conversation->SendMessageAsync(
       json_message, CreateConversationCallback(callback, callback_data),
       std::move(litert_lm_optional_args));
@@ -1117,6 +1193,27 @@ void litert_lm_conversation_cancel_process(LiteRtLmConversation* conversation) {
     return;
   }
   conversation->conversation->CancelProcess();
+}
+
+bool litert_lm_conversation_get_aux_output_floats(
+    LiteRtLmConversation* conversation, const char* tensor_name,
+    float* out_floats, size_t out_capacity, size_t* out_num_floats) {
+  if (!conversation || !conversation->conversation || !tensor_name ||
+      !out_num_floats) {
+    return false;
+  }
+  auto result =
+      conversation->conversation->GetAuxiliaryOutput(tensor_name);
+  if (!result.ok()) {
+    ABSL_LOG(ERROR) << "Failed to read auxiliary output '" << tensor_name
+                    << "': " << result.status();
+    return false;
+  }
+  *out_num_floats = result->size();
+  if (out_floats != nullptr && out_capacity >= result->size()) {
+    std::memcpy(out_floats, result->data(), result->size() * sizeof(float));
+  }
+  return true;
 }
 
 LiteRtLmBenchmarkInfo* litert_lm_conversation_get_benchmark_info(
