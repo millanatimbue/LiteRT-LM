@@ -28,24 +28,43 @@ let package = Package(
     )
   ],
   targets: [
-    // The Prebuilt Binary Target for iOS
+    // Locally-built binary targets (iOS only). Rebuild from THIS source before
+    // consuming — see LOCAL_BUILD.md:
+    //   bazelisk build //swift:CLiteRTLM        → CLiteRTLM.xcframework
+    //   xcodebuild -create-xcframework …        → the 4 accelerator xcframeworks
+    // then unzip/assemble into .local-xcframeworks/. The four accelerator
+    // dylibs are opaque upstream LFS blobs — keep them the SAME vintage as this
+    // runtime source (this branch is based on upstream/main @ v0.14, so pull the
+    // v0.14 dylibs via `git lfs pull`, not an older pin).
     .binaryTarget(
       name: "CLiteRTLM",
-      url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.13.1/CLiteRTLM.xcframework.zip",
-      checksum: "7ff01c42106b754748b5dd3036a4a57161b25ebf523e705bebc1219061852362"
+      path: ".local-xcframeworks/CLiteRTLM.xcframework"
     ),
-    // The Prebuilt Binary Target for Mac
     .binaryTarget(
-      name: "CLiteRTLM_mac",
-      url: "https://github.com/google-ai-edge/LiteRT-LM/releases/download/v0.13.1/CLiteRTLM_mac.xcframework.zip",
-      checksum: "ec9ffe230dc39117a7fc8933b1cc15910454027fee6d3041534ab7cf17313981"
+      name: "libGemmaModelConstraintProvider",
+      path: ".local-xcframeworks/libGemmaModelConstraintProvider.xcframework"
+    ),
+    .binaryTarget(
+      name: "libLiteRt",
+      path: ".local-xcframeworks/libLiteRt.xcframework"
+    ),
+    .binaryTarget(
+      name: "libLiteRtMetalAccelerator",
+      path: ".local-xcframeworks/libLiteRtMetalAccelerator.xcframework"
+    ),
+    .binaryTarget(
+      name: "libLiteRtTopKMetalSampler",
+      path: ".local-xcframeworks/libLiteRtTopKMetalSampler.xcframework"
     ),
     // The Swift Wrapper Target
     .target(
       name: "LiteRTLM",
       dependencies: [
-        .target(name: "CLiteRTLM", condition: .when(platforms: [.iOS])),
-        .target(name: "CLiteRTLM_mac", condition: .when(platforms: [.macOS]))
+        "CLiteRTLM",
+        "libGemmaModelConstraintProvider",
+        "libLiteRt",
+        "libLiteRtMetalAccelerator",
+        "libLiteRtTopKMetalSampler",
       ],
       path: "swift",
       exclude: [
