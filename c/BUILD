@@ -60,6 +60,8 @@ ENGINE_COMMON_DEPS = [
     "//runtime/proto:token_cc_proto",
     "//runtime/util:logging",
     "//runtime/util:scoped_file",
+    "//runtime/components/logits_processor/constrained_decoding:llg_constraint_config",
+    "//runtime/components/logits_processor/constrained_decoding:constraint_provider_config",
 ]
 
 cc_library(
