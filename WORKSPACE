@@ -388,6 +388,13 @@ http_archive(
 
 http_archive(
     name = "litert",
+    # [BIND-FIX] Erase stale custom_allocations_ entries when a KV-cache tensor
+    # is upgraded from the kTfLiteCustom slow path to the kTfLiteNonCpu
+    # accelerator fast path — otherwise AllocateTensors() trips
+    # `allocation_type != kTfLiteCustom (8 != 6)` on the second sendMessage of a
+    # cloned (prefix-cached) conversation on iOS Metal. See PATCH.litert.
+    patches = ["@//:PATCH.litert"],
+    patch_args = ["-p1"],
     patch_cmds = [
         # Replace @//third_party with @litert//third_party in files under third_party/.
         "sed -i -e 's|\"@//third_party/|\"@litert//third_party/|g' third_party/*/*",
