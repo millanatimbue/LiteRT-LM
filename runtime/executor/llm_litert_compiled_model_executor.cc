@@ -729,6 +729,124 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::PrefillInternal(
                                   async);
 }
 
+absl::StatusOr<LoraManager*>
+LlmLiteRtCompiledModelExecutorBase::GetOrCreateLoraManager(
+    absl::string_view signature) {
+  if (!lora_model_assets_.has_value() || !loaded_lora_id_.has_value()) {
+    return nullptr;  // No adapter registered on this executor.
+  }
+  if (auto it = lora_managers_.find(signature); it != lora_managers_.end()) {
+    return it->second.get();
+  }
+  // LoraManager is per-signature in this runtime: its LoRA buffers are created
+  // via CreateInputBuffer against `signature`, and LiteRT rejects buffers
+  // created against a different signature. Build one per signature that carries
+  // LoRA sockets (decode, prefill_*), all backed by the same scoped adapter.
+  ABSL_ASSIGN_OR_RETURN(auto manager,
+                        LoraManager::Create(*compiled_model_, signature));
+  ABSL_RETURN_IF_ERROR(
+      manager->LoadLoRA(*loaded_lora_id_, *lora_model_assets_));
+  ABSL_RETURN_IF_ERROR(manager->UseLoRA(*loaded_lora_id_));
+  LoraManager* raw = manager.get();
+  lora_managers_[std::string(signature)] = std::move(manager);
+  return raw;
+}
+
+absl::Status LlmLiteRtCompiledModelExecutorBase::MergeLoRAInputs(
+    absl::string_view signature,
+    absl::flat_hash_map<absl::string_view, TensorBuffer>& input_buffers) {
+  // Conditional activation lives here: bind LoRA only if THIS context asked for
+  // it. The lora_id is read from the per-context processed_context (set at
+  // CreateNewContext time from SessionConfig::GetScopedLoraFile), never from an
+  // engine-global — so a chat context (no id) skips the adapter even if a
+  // detection context ran on the same engine earlier. This is the primitive the
+  // app's chat/detection split relies on.
+  const std::optional<uint32_t> context_lora_id =
+      llm_context_->processed_context().lora_id();
+  if (!context_lora_id.has_value()) {
+    // No adapter on this context (chat / filtering). The socketed graph still
+    // requires its LoRA inputs to be fed, so bind all-zeros — the LoRA term is
+    // then exactly zero and the model is numerically the base model. No-op for
+    // models without LoRA sockets (the loop finds none).
+    return BindZeroLoRA(signature, input_buffers);
+  }
+  ABSL_ASSIGN_OR_RETURN(LoraManager* manager,
+                        GetOrCreateLoraManager(signature));
+  if (manager == nullptr) {
+    return absl::FailedPreconditionError(
+        "Context requested LoRA but no adapter was loaded on this executor "
+        "(ResourceManager::CreateContextHandler must call LoadLoRA first).");
+  }
+  // Single-adapter assumption: GetLoRABuffers() returns the manager's active
+  // LoRA (set via UseLoRA at creation). Bouncer scopes exactly one detector
+  // adapter, so context_lora_id always == loaded_lora_id_. Multi-adapter
+  // support would UseLoRA(context_lora_id) here before reading buffers.
+  ABSL_ASSIGN_OR_RETURN(auto lora_buffers, manager->GetLoRABuffers());
+  for (auto& [input_name, input_buffer] : lora_buffers) {
+    input_buffers[input_name] = std::move(input_buffer);
+  }
+  return absl::OkStatus();
+}
+
+absl::Status LlmLiteRtCompiledModelExecutorBase::BindZeroLoRA(
+    absl::string_view signature,
+    absl::flat_hash_map<absl::string_view, TensorBuffer>& input_buffers) {
+  // The "null LoRA" path: feed all-zero buffers to a signature's LoRA sockets
+  // so a socketed model runs as the plain base model when no adapter is scoped.
+  // Buffers are created once per signature and cached (fixed input set — see
+  // the compile-once invariant), then bound as duplicates. Mirrors the
+  // zero-fill branch in components/lora.cc LoRA::Init.
+  auto it = zero_lora_buffers_.find(signature);
+  if (it == zero_lora_buffers_.end()) {
+    absl::flat_hash_map<std::string, TensorBuffer> zeros;
+    LITERT_ASSIGN_OR_RETURN(auto input_names,
+                            compiled_model_->GetSignatureInputNames(signature));
+    for (const auto& name : input_names) {
+      if (!IsLoRAInputName(name)) {
+        continue;
+      }
+      LITERT_ASSIGN_OR_RETURN(
+          auto buf, compiled_model_->CreateInputBuffer(signature, name));
+      {
+        LITERT_ASSIGN_OR_RETURN(
+            auto lock, litert::TensorBufferScopedLock::Create(
+                           buf, TensorBuffer::LockMode::kWrite));
+        LITERT_ASSIGN_OR_RETURN(auto size, buf.PackedSize());
+        std::memset(lock.second, 0, size);
+      }
+      zeros[std::string(name)] = std::move(buf);
+    }
+    it = zero_lora_buffers_.emplace(std::string(signature), std::move(zeros))
+             .first;
+  }
+  for (const auto& [name, buf] : it->second) {
+    LITERT_ASSIGN_OR_RETURN(auto dup, buf.Duplicate());
+    input_buffers[name] = std::move(dup);
+  }
+  return absl::OkStatus();
+}
+
+absl::Status LlmLiteRtCompiledModelExecutorBase::LoadLoRA(
+    uint32_t lora_id, const ModelAssets& model_assets) {
+  // Stash the scoped adapter; per-signature managers are built lazily on first
+  // bind (each needs buffers created against its own signature). Idempotent
+  // across detection sessions that reuse the same adapter.
+  lora_model_assets_ = model_assets;
+  loaded_lora_id_ = lora_id;
+  return absl::OkStatus();
+}
+
+absl::Status LlmLiteRtCompiledModelExecutorBase::UseLoRA(
+    std::optional<uint32_t> lora_id) {
+  // Engine-level "active id" is advisory; real binding is per-context (see
+  // MergeLoRAInputs). Mirrors the audio executor's Load/Use pairing so
+  // ResourceManager can drive text and audio LoRA the same way.
+  if (lora_id.has_value()) {
+    loaded_lora_id_ = lora_id;
+  }
+  return absl::OkStatus();
+}
+
 absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
     absl::string_view prefill_signature,
     absl::flat_hash_map<absl::string_view, TensorBuffer>& prefill_input_buffers,
@@ -742,6 +860,11 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunPrefill(
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
     input_buffers[input_name] = std::move(input_buffer_dup);
   }
+  // Bind the scoped LoRA adapter into the prefill signature's LoRA sockets so
+  // K/V is written with LoRA-modified projections (detection features are
+  // wrong otherwise). No-op for chat contexts. Executor skips LoRA-named inputs
+  // at buffer construction, so this hook is what actually feeds them.
+  ABSL_RETURN_IF_ERROR(MergeLoRAInputs(prefill_signature, input_buffers));
   absl::flat_hash_map<absl::string_view, TensorBuffer> output_buffers;
   for (const auto& [output_name, output_buffer] : *output_kv_cache_buffers_) {
     LITERT_ASSIGN_OR_RETURN(auto output_buffer_dup, output_buffer.Duplicate());
@@ -944,6 +1067,12 @@ absl::Status LlmLiteRtCompiledModelExecutorBase::BindTensorsAndRunDecode(
     LITERT_ASSIGN_OR_RETURN(auto input_buffer_dup, input_buffer.Duplicate());
     decode_input_buffers[input_name] = std::move(input_buffer_dup);
   }
+  // Bind the scoped LoRA adapter into the decode signature's LoRA sockets (the
+  // executor skips LoRA-named inputs at buffer construction). No-op for chat
+  // contexts. `kDecodeSignatureRunner` is the signature passed to RunAsync
+  // below, so LoRA buffers are created against the matching signature.
+  ABSL_RETURN_IF_ERROR(
+      MergeLoRAInputs(kDecodeSignatureRunner, decode_input_buffers));
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_output_buffers;
   for (const auto& [output_name, output_buffer] : decode_output_buffers_) {
     // LITERT_ASSIGN_OR_RETURN() causes a compilation error on windows.

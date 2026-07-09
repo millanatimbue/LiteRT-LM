@@ -37,6 +37,7 @@
 #include "runtime/components/embedding_lookup/embedding_lookup_manager.h"
 #include "runtime/components/model_resources.h"
 #include "runtime/components/sampler.h"
+#include "runtime/components/lora_manager.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/litert_compiled_model_executor_utils.h"
 #include "runtime/executor/llm_executor.h"
@@ -93,6 +94,15 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   // output tensor with that name.
   absl::StatusOr<std::vector<float>> GetAuxiliaryOutput(
       absl::string_view name) override;
+
+  // LoRA APIs. Stashes the scoped adapter (LoadLoRA) and marks it active
+  // (UseLoRA); per-signature LoRA managers are built lazily at first bind and
+  // applied only to contexts that carry a matching lora_id (see MergeLoRAInputs
+  // in the .cc). This is what makes chat vs. detection conditional on the same
+  // model file: a detection session scopes the adapter, a chat session doesn't.
+  absl::Status LoadLoRA(uint32_t lora_id,
+                        const ModelAssets& model_assets) override;
+  absl::Status UseLoRA(std::optional<uint32_t> lora_id) override;
 
   // State/context management APIs:
   absl::StatusOr<std::unique_ptr<LlmContext>> CreateNewContext(
@@ -329,6 +339,36 @@ class LlmLiteRtCompiledModelExecutorBase : public LlmExecutor {
   Environment& env_;
   const Model& model_;
   std::unique_ptr<CompiledModel> compiled_model_;
+
+  // --- Text-path LoRA (conditional adapter activation) ---
+  // Lazily create + load + activate the LoRA manager for `signature`; returns
+  // nullptr when no adapter has been loaded via LoadLoRA. LoRA buffers are
+  // signature-specific (LiteRT rejects buffers created against a different
+  // signature), so we keep one manager per signature (decode, prefill_*), all
+  // backed by the same scoped adapter.
+  absl::StatusOr<LoraManager*> GetOrCreateLoraManager(
+      absl::string_view signature);
+  // Merge the *current context's* LoRA tensors into `input_buffers` for
+  // `signature`. Reads the per-context lora_id (not an engine-global), so a
+  // chat context never binds an adapter left over from a detection context on
+  // the same engine. No-op when the context has no lora_id.
+  absl::Status MergeLoRAInputs(
+      absl::string_view signature,
+      absl::flat_hash_map<absl::string_view, TensorBuffer>& input_buffers);
+  // Bind all-zero buffers to `signature`'s LoRA sockets (the "null LoRA" path
+  // for chat / no adapter). Lazily creates + caches the zero buffers per
+  // signature in `zero_lora_buffers_`.
+  absl::Status BindZeroLoRA(
+      absl::string_view signature,
+      absl::flat_hash_map<absl::string_view, TensorBuffer>& input_buffers);
+
+  absl::flat_hash_map<std::string, std::unique_ptr<LoraManager>> lora_managers_;
+  // Cached all-zero LoRA buffers per signature (created once; bound as dups).
+  absl::flat_hash_map<std::string,
+                      absl::flat_hash_map<std::string, TensorBuffer>>
+      zero_lora_buffers_;
+  std::optional<ModelAssets> lora_model_assets_;
+  std::optional<uint32_t> loaded_lora_id_;
 
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_input_buffers_;
   absl::flat_hash_map<absl::string_view, TensorBuffer> decode_output_buffers_;

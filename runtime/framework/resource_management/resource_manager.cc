@@ -575,14 +575,21 @@ ResourceManager::CreateContextHandler(const SessionConfig& session_config) {
       /*lora_path=*/"",
       /*has_scoped_lora_file=*/session_config.GetScopedLoraFile() != nullptr);
 
-  // If lora is used and not loaded, load the lora.
+  // If lora is used and not loaded, load the lora onto the text executor.
   if (lora_id.has_value() && !lora_is_loaded) {
     RET_CHECK(session_config.GetScopedLoraFile() != nullptr);
     ABSL_ASSIGN_OR_RETURN(
         ModelAssets model_assets,
         ModelAssets::Create(session_config.GetScopedLoraFile(),
                             /*model_path=*/""));
-    return absl::InvalidArgumentError("Lora is not supported.");
+    // Register the scoped adapter with the text executor. This only makes the
+    // adapter *available*; the executor binds it per inference solely for
+    // contexts whose lora_id is set (below at CreateNewContext), so chat
+    // sessions (no scoped file → no lora_id) never apply it. Mirrors the audio
+    // executor's Load/Use pairing further down.
+    MovableMutexLock lock(&executor_mutex_);
+    ABSL_RETURN_IF_ERROR(llm_executor_->LoadLoRA(*lora_id, model_assets));
+    ABSL_RETURN_IF_ERROR(llm_executor_->UseLoRA(*lora_id));
   }
 
   // Find the audio lora id.

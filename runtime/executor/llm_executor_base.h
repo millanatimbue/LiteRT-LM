@@ -110,6 +110,26 @@ class LlmExecutorBase {
         ExecutorBackendName()));
   };
 
+  // ------------LoRA APIs (conditional adapter activation)------------:
+  // Registers a scoped LoRA adapter with this executor under `lora_id`. The
+  // adapter is bound into the graph's LoRA input sockets at prefill/decode
+  // time only for contexts whose per-context lora_id matches (see the
+  // compiled-model executor override). Default: Unimplemented.
+  virtual absl::Status LoadLoRA(uint32_t lora_id,
+                                const ModelAssets& model_assets) {
+    return absl::UnimplementedError(absl::StrCat(
+        "LoadLoRA not implemented for backend: ", ExecutorBackendName()));
+  };
+
+  // Marks `lora_id` as the executor's active adapter (or clears it with
+  // nullopt). Actual per-inference binding is driven by the per-context
+  // lora_id; this is the engine-level companion to LoadLoRA. Default:
+  // Unimplemented.
+  virtual absl::Status UseLoRA(std::optional<uint32_t> lora_id) {
+    return absl::UnimplementedError(absl::StrCat(
+        "UseLoRA not implemented for backend: ", ExecutorBackendName()));
+  };
+
   virtual absl::string_view ExecutorBackendName() const = 0;
 
   // Get vocabulary size used to build tensor buffers for decode functions.
