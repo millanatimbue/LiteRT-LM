@@ -1,2 +1,7 @@
 /MODULE.bazel.lock
 /bazel-*
+
+# Local Swift build + xcframework outputs (see LOCAL_BUILD.md)
+/.build/
+/.local-xcframeworks/
+/.swiftpm/
