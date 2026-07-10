@@ -28,33 +28,34 @@ let package = Package(
     )
   ],
   targets: [
-    // Locally-built binary targets (iOS only). Rebuild from THIS source before
-    // consuming — see LOCAL_BUILD.md:
-    //   bazelisk build //swift:CLiteRTLM        → CLiteRTLM.xcframework
-    //   xcodebuild -create-xcframework …        → the 4 accelerator xcframeworks
-    // then unzip/assemble into .local-xcframeworks/. The four accelerator
-    // dylibs are opaque upstream LFS blobs — keep them the SAME vintage as this
-    // runtime source (this branch is based on upstream/main @ v0.14, so pull the
-    // v0.14 dylibs via `git lfs pull`, not an older pin).
+    // Release-hosted binary targets (iOS only), built from
+    // experiment/upstream-v0.14-minimal @ 62812bbf — see the
+    // xcframework-detector-lora-v1 release. For local runtime iteration use the
+    // experiment branch instead (path-based .local-xcframeworks targets).
     .binaryTarget(
       name: "CLiteRTLM",
-      path: ".local-xcframeworks/CLiteRTLM.xcframework"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v1/CLiteRTLM.xcframework.zip",
+      checksum: "ccd3be597a0379f53b144bca5730f6d208b2a20639c233e2746220cb9f0d2009"
     ),
     .binaryTarget(
       name: "libGemmaModelConstraintProvider",
-      path: ".local-xcframeworks/libGemmaModelConstraintProvider.xcframework"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v1/libGemmaModelConstraintProvider.xcframework.zip",
+      checksum: "50efa310235fdaf3914cc97ee971cbb90429599fcdf2db83f14adb219ba2eabd"
     ),
     .binaryTarget(
       name: "libLiteRt",
-      path: ".local-xcframeworks/libLiteRt.xcframework"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v1/libLiteRt.xcframework.zip",
+      checksum: "f527d001db9e067c5e4e99df6b4ddb1867374f72b132fb59afa28efb75ef4db1"
     ),
     .binaryTarget(
       name: "libLiteRtMetalAccelerator",
-      path: ".local-xcframeworks/libLiteRtMetalAccelerator.xcframework"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v1/libLiteRtMetalAccelerator.xcframework.zip",
+      checksum: "e4429ae8ec53bea592e15af15d4c02ae4b9c90eae2bf7aa87dd0f58d95442655"
     ),
     .binaryTarget(
       name: "libLiteRtTopKMetalSampler",
-      path: ".local-xcframeworks/libLiteRtTopKMetalSampler.xcframework"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v1/libLiteRtTopKMetalSampler.xcframework.zip",
+      checksum: "edaa90e51fce6ddf6693e176e8f377731405906d27915b33e3c0f6cc39bd7ad4"
     ),
     // The Swift Wrapper Target
     .target(
