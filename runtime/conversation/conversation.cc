@@ -140,11 +140,21 @@ absl::StatusOr<ConversationConfig> ConversationConfig::CreateInternal(
   // head never saw and which shifts the last-token representation it pools over.
   // Suppress it with -2, NOT -1: -1 is the "unset" sentinel that every later
   // MaybeUpdateAndValidate (session creation re-validates) refills from model
-  // metadata — verified on device via [TOK-DBG] showing a stray [2] prefill
-  // when -1 was used. All BOS consumers gate on start_token_id >= 0, so any
+  // metadata — verified on device: with -1 a stray BOS [2] was still
+  // prefilled. All BOS consumers gate on start_token_id >= 0, so any
   // negative value disables them; only -1 gets refilled.
   if (skip_chat_template) {
     session_config_copy.SetStartTokenId(-2);
+    // Match training-time truncation (`truncation=True, max_length=cache`):
+    // over-long documents are cut to the first cache-size-1 tokens (the -1
+    // leaves room for the single decode step) instead of erroring. The
+    // classifier pools the last kept token, same as the reference harness.
+    const int cache_tokens = static_cast<int>(engine.GetEngineSettings()
+                                                  .GetMainExecutorSettings()
+                                                  .GetMaxNumTokens());
+    if (cache_tokens > 1) {
+      session_config_copy.SetInputTokenLimit(cache_tokens - 1);
+    }
   }
 
   auto metadata = engine.GetEngineSettings().GetLlmMetadata();

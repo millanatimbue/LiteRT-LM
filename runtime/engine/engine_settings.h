@@ -270,6 +270,17 @@ class SessionConfig {
     max_output_tokens_ = max_output_tokens;
   }
 
+  // When > 0, input token ids are TRUNCATED to this many tokens (keeping the
+  // first N) instead of erroring when they exceed the executor's
+  // max_num_tokens. Classifier/detection sessions use this to mirror
+  // training-time `truncation=True, max_length=N` semantics — the classifier
+  // pools the last KEPT token. 0 = off (over-long inputs error, the default
+  // chat behavior).
+  int GetInputTokenLimit() const { return input_token_limit_; }
+  void SetInputTokenLimit(int input_token_limit) {
+    input_token_limit_ = input_token_limit;
+  }
+
  private:
   // Private constructor for the SessionConfig. The user should use the
   // CreateDefault() method to create a SessionConfig.
@@ -327,6 +338,9 @@ class SessionConfig {
   // tokens (input + output) stored in the KV cache over the lifetime of a
   // session.
   int max_output_tokens_ = std::numeric_limits<int>::max();
+
+  // See Get/SetInputTokenLimit(). 0 = off.
+  int input_token_limit_ = 0;
 };
 
 std::ostream& operator<<(std::ostream& os, const SessionConfig& config);

@@ -20,6 +20,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
 #include "absl/status/status_macros.h"  // from @com_google_absl
 #include "absl/status/statusor.h"  // from @com_google_absl
@@ -74,6 +75,16 @@ absl::StatusOr<InputText> StringToProcessedInputText(
     ids.resize(benchmark_prefill_token_count);
   } else if (bos_token_found) {
     ids.insert(ids.begin(), session_config.GetStartTokenId());
+  }
+  // Classifier/detection sessions truncate over-long inputs to the first N
+  // tokens (training-parity `truncation=True`) instead of tripping the
+  // too-long error in the prefill task. See SessionConfig::SetInputTokenLimit.
+  const int input_token_limit = session_config.GetInputTokenLimit();
+  if (input_token_limit > 0 &&
+      static_cast<int>(ids.size()) > input_token_limit) {
+    ABSL_LOG(INFO) << "Input truncated " << ids.size() << " → "
+                   << input_token_limit << " tokens (input_token_limit)";
+    ids.resize(input_token_limit);
   }
   if (benchmark_info.has_value()) {
     ABSL_RETURN_IF_ERROR(const_cast<BenchmarkInfo&>(*benchmark_info)
