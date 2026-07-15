@@ -46,7 +46,7 @@ let package = Package(
     .binaryTarget(
       name: "GemmaProvider",
       url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v3/GemmaProvider.xcframework.zip",
-      checksum: "fe13ba75502457445fbe4225935c7e5718dd98db57ba3752dff15d5ea08a86f9"
+      checksum: "73e7f23b0b4cd07efc0cc7183d345d8bb428ec7853735cadb97cd212bceaee1c"
     ),
     .binaryTarget(
       name: "LiteRt",

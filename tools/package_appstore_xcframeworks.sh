@@ -83,6 +83,29 @@ print(f"  patched '{old.decode()}' -> '{new.decode()}' in {path.split('/')[-1]}"
 EOF
 }
 
+# normalize_minos <binary>
+# ASC rejects (ITMS-90208) frameworks whose Mach-O minos exceeds the app's
+# deployment target. GemmaProvider is built by our bazel without an explicit
+# min-version flag, so it inherits the SDK default (e.g. 26.2) while the
+# Google blobs are 15.0. Rewrite LC_BUILD_VERSION to minos 15.0, keeping the
+# original platform and SDK version. No-op when already 15.0, so the Google
+# blobs stay byte-identical. LC_UUID is not affected.
+normalize_minos() {
+  local bin="$1"
+  local minos platform sdk
+  minos=$(otool -l "$bin" | awk '/LC_BUILD_VERSION/{f=1} f && /minos/{print $2; exit}')
+  [ "$minos" = "15.0" ] && return 0
+  platform=$(otool -l "$bin" | awk '/LC_BUILD_VERSION/{f=1} f && /platform/{print $2; exit}')
+  sdk=$(otool -l "$bin" | awk '/LC_BUILD_VERSION/{f=1} f && /sdk/{print $2; exit}')
+  case "$platform" in
+    2) platform=ios ;;
+    7) platform=iossim ;;
+    *) echo "ERROR: unexpected platform '$platform' in $bin" >&2; return 1 ;;
+  esac
+  vtool -set-build-version "$platform" 15.0 "$sdk" -replace -output "$bin" "$bin"
+  echo "  normalized minos $minos -> 15.0 ($platform) in $(basename "$bin")"
+}
+
 # make_framework <slice-dir> <new-name> <dylib-path> <template-plist>
 make_framework() {
   local slice_dir="$1" name="$2" dylib="$3" template="$4"
@@ -90,6 +113,7 @@ make_framework() {
   mkdir -p "$fw"
   cp "$dylib" "$fw/$name"
   chmod +x "$fw/$name"
+  normalize_minos "$fw/$name"
   plutil -convert xml1 -o "$fw/Info.plist" "$template"
   plutil -replace CFBundleExecutable -string "$name" "$fw/Info.plist"
   plutil -replace CFBundleName -string "$name" "$fw/Info.plist"
