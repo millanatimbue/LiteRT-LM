@@ -28,45 +28,50 @@ let package = Package(
     )
   ],
   targets: [
-    // Release-hosted binary targets (iOS only), built from
-    // experiment/upstream-v0.14-minimal @ 73c862db — see the
-    // xcframework-detector-lora-v2 release. This branch also strips prebuilt/
-    // (LFS blobs) so SPM checkouts stay light. For local runtime iteration use
-    // the experiment branch instead (path-based .local-xcframeworks targets).
+    // Release-hosted binary targets (iOS only). Same binaries as the
+    // xcframework-detector-lora-v2 release (built from
+    // experiment/upstream-v0.14-minimal @ 73c862db), repackaged for App Store
+    // submission by tools/package_appstore_xcframeworks.sh: bare dylibs are
+    // wrapped in .framework bundles (ASC rejects loose dylibs with
+    // ITMS-90426), dlopen strings are patched to the framework paths, and
+    // dSYMs are bundled. See the xcframework-detector-lora-v3 release.
+    // This branch also strips prebuilt/ (LFS blobs) so SPM checkouts stay
+    // light. For local runtime iteration use the experiment branch instead
+    // (path-based .local-xcframeworks targets).
     .binaryTarget(
       name: "CLiteRTLM",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v2/CLiteRTLM.xcframework.zip",
-      checksum: "fc211b7f63bd59f49e79f46910cda1b1e3d55f003abdd3992503780dec6c8ce9"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v3/CLiteRTLM.xcframework.zip",
+      checksum: "d0b27f8865ac696a84a834ac7d4f018ce71a90a8977daa0d5ce84e39820be861"
     ),
     .binaryTarget(
-      name: "libGemmaModelConstraintProvider",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v2/libGemmaModelConstraintProvider.xcframework.zip",
-      checksum: "50efa310235fdaf3914cc97ee971cbb90429599fcdf2db83f14adb219ba2eabd"
+      name: "GemmaProvider",
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v3/GemmaProvider.xcframework.zip",
+      checksum: "fe13ba75502457445fbe4225935c7e5718dd98db57ba3752dff15d5ea08a86f9"
     ),
     .binaryTarget(
-      name: "libLiteRt",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v2/libLiteRt.xcframework.zip",
-      checksum: "f527d001db9e067c5e4e99df6b4ddb1867374f72b132fb59afa28efb75ef4db1"
+      name: "LiteRt",
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v3/LiteRt.xcframework.zip",
+      checksum: "17e25278bd328960fefb8f4c56784b1269803435a3854d93583bba66feb675d4"
     ),
     .binaryTarget(
-      name: "libLiteRtMetalAccelerator",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v2/libLiteRtMetalAccelerator.xcframework.zip",
-      checksum: "e4429ae8ec53bea592e15af15d4c02ae4b9c90eae2bf7aa87dd0f58d95442655"
+      name: "MtlAcc",
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v3/MtlAcc.xcframework.zip",
+      checksum: "702be95f68152e676325f198ed66b5115565f23c332f564a88bb63e5e38ff2ff"
     ),
     .binaryTarget(
-      name: "libLiteRtTopKMetalSampler",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v2/libLiteRtTopKMetalSampler.xcframework.zip",
-      checksum: "edaa90e51fce6ddf6693e176e8f377731405906d27915b33e3c0f6cc39bd7ad4"
+      name: "TopKMS",
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v3/TopKMS.xcframework.zip",
+      checksum: "6789c090f12d8c8246ae701d14a792144802a3a634b32e35d73449d868b3e254"
     ),
     // The Swift Wrapper Target
     .target(
       name: "LiteRTLM",
       dependencies: [
         "CLiteRTLM",
-        "libGemmaModelConstraintProvider",
-        "libLiteRt",
-        "libLiteRtMetalAccelerator",
-        "libLiteRtTopKMetalSampler",
+        "GemmaProvider",
+        "LiteRt",
+        "MtlAcc",
+        "TopKMS",
       ],
       path: "swift",
       exclude: [
