@@ -14,10 +14,6 @@
 
 #include "runtime/components/sampler_factory.h"
 
-#ifdef __APPLE__
-#include <TargetConditionals.h>
-#endif
-
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -513,19 +509,8 @@ class TopKMetalCApiSampler : public TopKCApiSampler {
     // Metal is only supported on Apple platforms (macOS/iOS/tvOS/watchOS).
     // The shared library validation will handle platform checks implicitly,
     // but typically we expect .dylib on Apple.
-    //
-    // On iOS the sampler ships wrapped in a framework bundle (the App Store
-    // rejects bare dylibs in app bundles), so dlopen it by the framework
-    // install name; the app links it, so dyld resolves the loaded image.
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-    constexpr const char* kTopKMetalSamplerLib =
-        "@rpath/libLiteRtTopKMetalSampler.framework/libLiteRtTopKMetalSampler";
-#else
-    constexpr const char* kTopKMetalSamplerLib =
-        "libLiteRtTopKMetalSampler.dylib";
-#endif
     auto capi_or = GetSamplerCApi(
-        kTopKMetalSamplerLib, "LiteRtTopKMetalSampler_Create",
+        "libLiteRtTopKMetalSampler.dylib", "LiteRtTopKMetalSampler_Create",
         "LiteRtTopKMetalSampler_Destroy",
         "LiteRtTopKMetalSampler_SampleToIdAndScoreBuffer",
         "LiteRtTopKMetalSampler_UpdateConfig",

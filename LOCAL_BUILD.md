@@ -113,25 +113,34 @@ builds.
 
 ## 4. Assemble `.local-xcframeworks/`
 
+bazel only produces `CLiteRTLM.xcframework.zip`. The four accelerator
+xcframeworks are wrapped from the prebuilt dylibs via `xcodebuild`:
+
 ```bash
 cd /Users/darrenjia/feedfilter/LiteRT-LM
-tools/package_ios_frameworks.sh
+PREBUILT="$PWD/prebuilt"
+
+# CLiteRTLM (from bazel)
+rm -rf .local-xcframeworks/CLiteRTLM.xcframework
+unzip -q bazel-bin/swift/CLiteRTLM.xcframework.zip -d .local-xcframeworks/
+
+# Three accelerator dylibs that ship both device + simulator slices
+for lib in libGemmaModelConstraintProvider libLiteRt libLiteRtMetalAccelerator; do
+  rm -rf .local-xcframeworks/${lib}.xcframework
+  xcodebuild -create-xcframework \
+    -library "$PREBUILT/ios_arm64/${lib}.dylib" \
+    -library "$PREBUILT/ios_sim_arm64/${lib}.dylib" \
+    -output ".local-xcframeworks/${lib}.xcframework"
+done
+
+# libLiteRtTopKMetalSampler: device-only (no simulator slice upstream).
+# The C++ side dlopens it conditionally on device; sim builds tolerate
+# its absence.
+rm -rf .local-xcframeworks/libLiteRtTopKMetalSampler.xcframework
+xcodebuild -create-xcframework \
+  -library "$PREBUILT/ios_arm64/libLiteRtTopKMetalSampler.dylib" \
+  -output ".local-xcframeworks/libLiteRtTopKMetalSampler.xcframework"
 ```
-
-bazel only produces `CLiteRTLM.xcframework.zip`; the script wraps the four
-prebuilt accelerator dylibs into **framework bundles** (NOT bare `-library`
-xcframeworks — the App Store rejects bare dylibs in an app bundle with the
-misleading ITMS-90426 "SwiftSupport folder is missing" error). It also:
-
-- patches the dlopen name inside the opaque `libLiteRt` blob and rewires its
-  rpaths so the Metal accelerator is found inside its framework bundle;
-- rewrites CLiteRTLM's `libGemmaModelConstraintProvider` load command to the
-  framework install name (bazel links against the bare dylib);
-- writes SPM-ready zips + checksums to `dist-xcframeworks/` for release cuts.
-
-libLiteRtTopKMetalSampler stays device-only (no simulator slice upstream);
-sampler_factory.cc dlopens it by framework install name on iOS and sim builds
-tolerate its absence.
 
 After this, `.local-xcframeworks/` should contain five
 `*.xcframework` directories — referenced as
