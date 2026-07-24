@@ -206,6 +206,9 @@ internal object LiteRtLmJni {
    *   decoding.
    * @param filterChannelContentFromKvCache Whether to filter channel content from the KV cache.
    * @param prefillPrefaceOnInit Whether to prefill the preface when initializing the conversation.
+   * @param skipChatTemplate Whether to bypass chat-template wrapping for this conversation.
+   * @param enableRegexConstraint Whether to install the LlGuidance constraint provider so per-call
+   *   regex constraints (see nativeSendMessage) can be applied.
    * @return A pointer to the native conversation instance.
    */
   external fun nativeCreateConversation(
@@ -221,6 +224,8 @@ internal object LiteRtLmJni {
     loraPath: String?,
     audioLoraPath: String?,
     prefillPrefaceOnInit: Boolean,
+    skipChatTemplate: Boolean,
+    enableRegexConstraint: Boolean,
   ): Long
 
   /**
@@ -242,6 +247,9 @@ internal object LiteRtLmJni {
    * @param callback The callback to receive the streaming responses.
    * @param visualTokenBudget The visual token budget. Only supported by Gemma4 currently. Null for
    *   default.
+   * @param regexConstraint LlGuidance regex constraint applied to this call's decoding, or null.
+   *   Requires the conversation to have been created with enableRegexConstraint.
+   * @param maxOutputTokens Cap on decode steps for this call, or null for no cap.
    */
   external fun nativeSendMessageAsync(
     conversationPointer: Long,
@@ -249,6 +257,8 @@ internal object LiteRtLmJni {
     extraContextJsonString: String,
     callback: JniMessageCallback,
     visualTokenBudget: Int?,
+    regexConstraint: String?,
+    maxOutputTokens: Int?,
   )
 
   /**
@@ -260,6 +270,9 @@ internal object LiteRtLmJni {
    *   format.
    * @param visualTokenBudget The visual token budget. Only supported by Gemma4 currently. Null for
    *   default.
+   * @param regexConstraint LlGuidance regex constraint applied to this call's decoding, or null.
+   *   Requires the conversation to have been created with enableRegexConstraint.
+   * @param maxOutputTokens Cap on decode steps for this call, or null for no cap.
    * @return The response message in JSON string format.
    */
   external fun nativeSendMessage(
@@ -267,7 +280,31 @@ internal object LiteRtLmJni {
     messageJsonString: String,
     extraContextJsonString: String,
     visualTokenBudget: Int?,
+    regexConstraint: String?,
+    maxOutputTokens: Int?,
   ): String
+
+  /**
+   * Clones the LiteRT-LM conversation, sharing the KV-cache prefix at clone time.
+   *
+   * @param conversationPointer A pointer to the native conversation instance.
+   * @return A pointer to the cloned native conversation instance.
+   * @throws LiteRtLmJniException if the underlying native clone fails.
+   */
+  external fun nativeConversationClone(conversationPointer: Long): Long
+
+  /**
+   * Reads a named auxiliary output tensor populated during the most recent sendMessage call.
+   *
+   * @param conversationPointer A pointer to the native conversation instance.
+   * @param name The name of the auxiliary output tensor.
+   * @return The tensor contents as a flat float array.
+   * @throws LiteRtLmJniException if the tensor is unavailable.
+   */
+  external fun nativeConversationGetAuxiliaryOutput(
+    conversationPointer: Long,
+    name: String,
+  ): FloatArray
 
   /**
    * Cancels the ongoing conversation process.

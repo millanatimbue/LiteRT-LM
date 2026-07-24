@@ -30,6 +30,8 @@
 #include "absl/time/time.h"  // from @com_google_absl
 #include "nlohmann/json_fwd.hpp"  // from @nlohmann_json
 #include "litert/cc/internal/scoped_file.h"  // from @litert
+#include "runtime/components/logits_processor/constrained_decoding/constraint_provider_config.h"
+#include "runtime/components/logits_processor/constrained_decoding/llg_constraint_config.h"
 #include "runtime/components/prompt_template.h"
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
@@ -75,6 +77,9 @@ using litert::lm::InputData;
 using litert::lm::InputImage;
 using litert::lm::InputText;
 using litert::lm::JsonPreface;
+using litert::lm::LlgConstraintType;
+using litert::lm::LlGuidanceConfig;
+using litert::lm::LlGuidanceConstraintArg;
 using litert::lm::Message;
 using litert::lm::ModelAssets;
 using litert::lm::Preface;
@@ -351,6 +356,26 @@ std::optional<litert::lm::DataProcessorArguments> GetDataProcessorArguments(
     }
   }
   return std::nullopt;
+}
+
+// Applies the per-call regex constraint and decode-step cap to the message's
+// OptionalArgs. The regex requires the conversation to have been created with
+// a constraint provider (see enable_regex_constraint in
+// nativeCreateConversation); the constraint restricts decoding to strings the
+// regex accepts.
+void ApplyPerCallDecodingArgs(JNIEnv* env, jstring regex_constraint,
+                              jobject max_output_tokens_obj,
+                              litert::lm::OptionalArgs& optional_args) {
+  if (regex_constraint != nullptr) {
+    const char* regex_chars = env->GetStringUTFChars(regex_constraint, nullptr);
+    std::string regex(regex_chars);
+    env->ReleaseStringUTFChars(regex_constraint, regex_chars);
+    if (!regex.empty()) {
+      optional_args.decoding_constraint =
+          LlGuidanceConstraintArg{LlgConstraintType::kRegex, std::move(regex)};
+    }
+  }
+  optional_args.max_output_tokens = GetOptionalInt(env, max_output_tokens_obj);
 }
 
 }  // namespace
@@ -898,7 +923,8 @@ LITERTLM_JNIEXPORT jlong JNICALL JNI_METHOD(nativeCreateConversation)(
     jboolean enable_constrained_decoding,
     jboolean filter_channel_content_from_kv_cache,
     jstring overwrite_prompt_template, jstring lora_path_str,
-    jstring audio_lora_path_str, jboolean prefill_preface_on_init) {
+    jstring audio_lora_path_str, jboolean prefill_preface_on_init,
+    jboolean skip_chat_template, jboolean enable_regex_constraint) {
   Engine* engine = reinterpret_cast<Engine*>(engine_pointer);
 
   // Create a native SessionConfig
@@ -981,7 +1007,14 @@ LITERTLM_JNIEXPORT jlong JNICALL JNI_METHOD(nativeCreateConversation)(
           .SetEnableConstrainedDecoding(enable_constrained_decoding)
           .SetFilterChannelContentFromKvCache(
               filter_channel_content_from_kv_cache)
-          .SetPrefillPrefaceOnInit(prefill_preface_on_init);
+          .SetPrefillPrefaceOnInit(prefill_preface_on_init)
+          .SetSkipChatTemplate(skip_chat_template);
+
+  if (enable_regex_constraint) {
+    // Install the LlGuidance constraint provider; the per-call regex is
+    // attached to each SendMessage via ApplyPerCallDecodingArgs.
+    conversation_config_builder.SetConstraintProviderConfig(LlGuidanceConfig{});
+  }
 
   // Set the channels, if provided.
   // If channels is nullptr, the Conversation will use the channels defined in
@@ -1044,7 +1077,8 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeDeleteConversation)(
 LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
     JNIEnv* env, jclass thiz, jlong conversation_pointer,
     jstring messageJSONString, jstring extraContextJsonString, jobject callback,
-    jobject visual_token_budget) {
+    jobject visual_token_budget, jstring regex_constraint,
+    jobject max_output_tokens) {
   JavaVM* jvm = nullptr;
   if (env->GetJavaVM(&jvm) != JNI_OK) {
     ThrowLiteRtLmJniException(env, "Failed to get JavaVM");
@@ -1069,6 +1103,8 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
   if (args.has_value()) {
     optional_args.args = std::move(args);
   }
+  ApplyPerCallDecodingArgs(env, regex_constraint, max_output_tokens,
+                           optional_args);
 
   jobject callback_global = env->NewGlobalRef(callback);
   jclass callback_class = env->GetObjectClass(callback_global);
@@ -1153,7 +1189,8 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
 LITERTLM_JNIEXPORT jstring JNICALL JNI_METHOD(nativeSendMessage)(
     JNIEnv* env, jclass thiz, jlong conversation_pointer,
     jstring messageJSONString, jstring extraContextJsonString,
-    jobject visual_token_budget) {
+    jobject visual_token_budget, jstring regex_constraint,
+    jobject max_output_tokens) {
   Conversation* conversation =
       reinterpret_cast<Conversation*>(conversation_pointer);
 
@@ -1172,6 +1209,8 @@ LITERTLM_JNIEXPORT jstring JNICALL JNI_METHOD(nativeSendMessage)(
   if (args.has_value()) {
     optional_args.args = std::move(args);
   }
+  ApplyPerCallDecodingArgs(env, regex_constraint, max_output_tokens,
+                           optional_args);
 
   auto response =
       conversation->SendMessage(json_message, std::move(optional_args));
@@ -1182,6 +1221,47 @@ LITERTLM_JNIEXPORT jstring JNICALL JNI_METHOD(nativeSendMessage)(
   }
 
   return NewStringStandardUTF(env, response->dump());
+}
+
+LITERTLM_JNIEXPORT jlong JNICALL JNI_METHOD(nativeConversationClone)(
+    JNIEnv* env, jclass thiz, jlong conversation_pointer) {
+  Conversation* conversation =
+      reinterpret_cast<Conversation*>(conversation_pointer);
+  auto cloned = conversation->Clone();
+  if (!cloned.ok()) {
+    ThrowLiteRtLmJniException(
+        env, "Failed to clone the conversation: " + cloned.status().ToString());
+    return 0;
+  }
+  return reinterpret_cast<jlong>(cloned->release());
+}
+
+LITERTLM_JNIEXPORT jfloatArray JNICALL
+JNI_METHOD(nativeConversationGetAuxiliaryOutput)(JNIEnv* env, jclass thiz,
+                                                 jlong conversation_pointer,
+                                                 jstring name) {
+  Conversation* conversation =
+      reinterpret_cast<Conversation*>(conversation_pointer);
+
+  const char* name_chars = env->GetStringUTFChars(name, nullptr);
+  std::string tensor_name(name_chars);
+  env->ReleaseStringUTFChars(name, name_chars);
+
+  auto result = conversation->GetAuxiliaryOutput(tensor_name);
+  if (!result.ok()) {
+    ThrowLiteRtLmJniException(env, "Failed to read auxiliary output '" +
+                                       tensor_name +
+                                       "': " + result.status().ToString());
+    return nullptr;
+  }
+
+  jfloatArray output = env->NewFloatArray(result->size());
+  if (output == nullptr) {
+    ThrowLiteRtLmJniException(env, "Failed to allocate auxiliary output array");
+    return nullptr;
+  }
+  env->SetFloatArrayRegion(output, 0, result->size(), result->data());
+  return output;
 }
 
 LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeConversationCancelProcess)(

@@ -116,10 +116,20 @@ data class EngineConfig(
  *   key. If `null`, uses the default channel configuration from the `LlmMetadata`. If empty,
  *   channels will be disabled.
  * @property extraContext Optional context passed to the prompt template rendering.
- * @property loraConfig Configuration for LoRA weights.
+ * @property loraConfig Configuration for LoRA weights. The LoRA adapter is scoped to this
+ *   conversation only; other conversations on the same engine are unaffected.
  * @property prefillPrefaceOnInit Whether to prefill the preface on initialization. Defaults to
  *   false. Note that this will make createConversation() take longer to finish, so you may want to
- *   call it in a background thread.
+ *   call it in a background thread. Required for [Conversation.clone]-based prefix caching: the
+ *   preface KV cache must be populated at init so clones inherit it.
+ * @property skipChatTemplate Whether to bypass chat-template wrapping and feed message text to the
+ *   model verbatim. Required for classifier-head conversations that read auxiliary outputs.
+ * @property maxOutputTokens Cap on decode steps per `sendMessage` call. Set to `1` for
+ *   classification-style calls that only need the prefill (plus a single decode step). If `null`,
+ *   decoding runs until EOS or the engine's token limit.
+ * @property regexConstraint Optional LlGuidance regex constraint applied to every `sendMessage`
+ *   call on this conversation. Decoding is restricted to strings matching the regex's language.
+ *   Cloned conversations inherit the parent's regex. `null` disables constrained decoding.
  */
 data class ConversationConfig
 @JvmOverloads
@@ -133,7 +143,16 @@ constructor(
   val extraContext: Map<String, Any> = emptyMap(),
   val loraConfig: LoraConfig? = null,
   val prefillPrefaceOnInit: Boolean = false,
-)
+  val skipChatTemplate: Boolean = false,
+  val maxOutputTokens: Int? = null,
+  val regexConstraint: String? = null,
+) {
+  init {
+    require(maxOutputTokens == null || maxOutputTokens > 0) {
+      "maxOutputTokens must be positive or null (decode until EOS)."
+    }
+  }
+}
 
 /**
  * Configuration for the sampling process.

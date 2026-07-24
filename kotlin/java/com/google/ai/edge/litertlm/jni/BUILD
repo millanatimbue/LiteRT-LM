@@ -38,6 +38,8 @@ cc_binary(
         "@litert//litert/cc/internal:scoped_file",
         "//runtime/components:model_resources",
         "//runtime/components:prompt_template",
+        "//runtime/components/logits_processor/constrained_decoding:constraint_provider_config",
+        "//runtime/components/logits_processor/constrained_decoding:llg_constraint_config",
         "//runtime/conversation",
         "//runtime/conversation:io_types",
         "//runtime/conversation/model_data_processor:config_registry",

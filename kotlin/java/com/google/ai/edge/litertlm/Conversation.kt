@@ -65,11 +65,17 @@ import kotlinx.coroutines.flow.callbackFlow
  * @property handle The native handle to the conversation object.
  * @property toolManager The ToolManager instance to use for this conversation.
  * @property automaticToolCalling Whether to enable automatic tool calling.
+ * @property regexConstraint LlGuidance regex applied to every `sendMessage` call (see
+ *   [ConversationConfig.regexConstraint]). Inherited by clones.
+ * @property maxOutputTokens Per-call decode-step cap (see [ConversationConfig.maxOutputTokens]).
+ *   Inherited by clones.
  */
 class Conversation(
   private val handle: Long,
   val toolManager: ToolManager = ToolManager(),
   val automaticToolCalling: Boolean = true,
+  val regexConstraint: String? = null,
+  val maxOutputTokens: Int? = null,
 ) : AutoCloseable {
   private val _isAlive = AtomicBoolean(true)
 
@@ -106,6 +112,8 @@ class Conversation(
           currentMessageJson.toString(),
           extraContextJsonString,
           visualTokenBudget,
+          regexConstraint,
+          maxOutputTokens,
         )
       val responseJsonObject = JsonParser.parseString(responseJsonString).asJsonObject
 
@@ -192,6 +200,8 @@ class Conversation(
       extraContextJsonString,
       jniCallback,
       visualTokenBudget,
+      regexConstraint,
+      maxOutputTokens,
     )
   }
 
@@ -377,6 +387,8 @@ class Conversation(
           "{}",
           this@JniMessageCallbackImpl,
           @OptIn(ExperimentalApi::class) ExperimentalFlags.visualTokenBudget,
+          regexConstraint,
+          maxOutputTokens,
         )
         pendingToolResponseJSONMessage = null // Clear after sending
       } else {
@@ -392,6 +404,49 @@ class Conversation(
         callback.onError(LiteRtLmJniException("Status Code: $statusCode. Message: $message"))
       }
     }
+  }
+
+  /**
+   * Clones the conversation. The cloned conversation is independent of the original but shares its
+   * KV-cache prefix at the time of cloning.
+   *
+   * For repeated requests with a fixed preamble, create a base conversation with
+   * [ConversationConfig.prefillPrefaceOnInit] set to true, then clone it per request and send only
+   * the variable portion as a user message. Each clone owns its own KV cache from that point on.
+   *
+   * The clone inherits the parent's [regexConstraint] and [maxOutputTokens].
+   *
+   * @return The cloned conversation.
+   * @throws IllegalStateException if the conversation is not alive.
+   * @throws LiteRtLmJniException if the native clone fails.
+   */
+  fun clone(): Conversation {
+    checkIsAlive()
+    return Conversation(
+      LiteRtLmJni.nativeConversationClone(handle),
+      toolManager,
+      automaticToolCalling,
+      regexConstraint,
+      maxOutputTokens,
+    )
+  }
+
+  /**
+   * Reads a named auxiliary output tensor populated by the model during the most recent
+   * `sendMessage` call on this conversation.
+   *
+   * Auxiliary outputs are extra model outputs beyond the decoded text — e.g. a hidden-state
+   * `"activations"` tensor consumed by an external classifier head. Only available for models
+   * exported with auxiliary output tensors.
+   *
+   * @param name The name of the auxiliary output tensor.
+   * @return The tensor contents as a flat [FloatArray].
+   * @throws IllegalStateException if the conversation is not alive.
+   * @throws LiteRtLmJniException if the tensor is unavailable.
+   */
+  fun getAuxiliaryOutput(name: String): FloatArray {
+    checkIsAlive()
+    return LiteRtLmJni.nativeConversationGetAuxiliaryOutput(handle, name)
   }
 
   /**

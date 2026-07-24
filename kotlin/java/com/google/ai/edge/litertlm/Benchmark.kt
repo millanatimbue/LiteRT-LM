@@ -91,6 +91,8 @@ fun benchmark(
         null, // loraPath
         null, // audioLoraPath
         false, // prefillPrefaceOnInit
+        false, // skipChatTemplate
+        false, // enableRegexConstraint
       )
 
     Conversation(conversationHandle).use { conversation ->
