@@ -140,6 +140,9 @@ build:linux --action_env=CXX=clang++
 # https://docs.bazel.build/versions/master/user-manual.html#flag--fat_apk_cpu
 build:android --crosstool_top=//external:android/crosstool
 build:android --host_crosstool_top=@bazel_tools//tools/cpp:toolchain
+# Google Play requires 16 KB page-size support for Android 15+ targets:
+# ELF LOAD segments must be aligned to 16 KB boundaries.
+build:android --linkopt=-Wl,-z,max-page-size=16384
 build:android_arm --config=android
 build:android_arm --cpu=armeabi-v7a
 build:android_arm --fat_apk_cpu=armeabi-v7a
