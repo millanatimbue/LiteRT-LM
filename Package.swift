@@ -35,6 +35,10 @@ let package = Package(
     // wrapped in .framework bundles (ASC rejects loose dylibs with
     // ITMS-90426), dlopen strings are patched to the framework paths, and
     // dSYMs are bundled. See the xcframework-detector-lora-v3.1 release.
+    // TopKMS comes from the v3.2 release: identical device slice, plus an
+    // empty-stub ios-arm64-simulator slice so iOS Simulator builds link
+    // (upstream ships no simulator sampler; the sampler is dlopen'd with a
+    // CPU fallback, and apps should not offer local inference in the sim).
     // This branch also strips prebuilt/ (LFS blobs) so SPM checkouts stay
     // light. For local runtime iteration use the experiment branch instead
     // (path-based .local-xcframeworks targets).
@@ -60,8 +64,8 @@ let package = Package(
     ),
     .binaryTarget(
       name: "TopKMS",
-      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v3.1/TopKMS.xcframework.zip",
-      checksum: "e8d61381caad798152fb8b081ac3e5f7488fe418123df2406d0364ef3c4ba504"
+      url: "https://github.com/millanatimbue/LiteRT-LM/releases/download/xcframework-detector-lora-v3.2/TopKMS.xcframework.zip",
+      checksum: "1fcd278487aee889c01edb456a89a22396efd0bdc5d1891af76bee20d78fcca5"
     ),
     // The Swift Wrapper Target
     .target(
